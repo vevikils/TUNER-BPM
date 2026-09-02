@@ -1,0 +1,48 @@
+# Build directories
+/build/
+/build*/
+/Output/
+/bin/
+/lib/
+/_deps/
+
+# JUCE & IDE generated files
+.vs/
+.idea/
+*.sln.docstates
+*.user
+*.suo
+*.userosctable
+*.sln.vcxproj.user
+
+# Compiled object files and libraries
+*.obj
+*.o
+*.lib
+*.a
+*.dll
+*.so
+*.dylib
+*.exe
+*.vst3
+*.component
+*.app
+
+# CMake artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+install_manifest.txt
+compile_commands.json
+
+# Operating System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+*.swp
