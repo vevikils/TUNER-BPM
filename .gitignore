@@ -5,6 +5,7 @@
 /bin/
 /lib/
 /_deps/
+Release_Builds/
 
 # JUCE & IDE generated files
 .vs/
