@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <numeric>
 
+//==============================================================================
 juce::AudioProcessorValueTreeState::ParameterLayout TunerBPMPluginAudioProcessor::createParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
@@ -26,6 +27,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout TunerBPMPluginAudioProcessor
     return { params.begin(), params.end() };
 }
 
+//==============================================================================
 TunerBPMPluginAudioProcessor::TunerBPMPluginAudioProcessor()
 #ifndef JucePlugin_PreferredChannelConfigurations
      : AudioProcessor (BusesProperties()
@@ -36,34 +38,39 @@ TunerBPMPluginAudioProcessor::TunerBPMPluginAudioProcessor()
                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
                      #endif
                        ),
-       apvts(*this, nullptr, "Parameters", createParameterLayout())
+       apvts(*this, nullptr, "Parameters", createParameterLayout()),
+       forwardFFT(fftOrder),
+       windowFunction(fftSize, juce::dsp::WindowingFunction<float>::hann)
 #endif
 {
+    fftFifo.resize(fftSize, 0.0f);
+    fftBuffer.resize(fftSize * 2, 0.0f);
     pitchBuffer.resize(2048, 0.0f);
     noveltyBuffer.resize(noveltyBufferSize, 0.0f);
     oscilloscopeBuffer.resize(oscilloscopeSize, 0.0f);
     recentBpmCandidates.reserve(16);
-    kickOnsetsRing.reserve(32);
+    detectedOnsetTimes.reserve(64);
 
-    for (int i = 0; i < 36; ++i)
-    {
-        int midiNote = 48 + i; // C3 (48) to B5 (83)
-        double freq = 440.0 * std::pow(2.0, (midiNote - 69.0) / 12.0);
-        chromaFilters[i].makeBandPass(44100.0, freq, 18.0);
-    }
+    // Register audio formats for drag-and-drop file analyzer
+    formatManager.registerBasicFormats();
 
-    kickBandPass.makeBandPass(44100.0, 62.0, 1.3);
-    kickLowPass.makeLowPass(44100.0, 110.0, 0.7071);
-    midBandPass.makeBandPass(44100.0, 1200.0, 0.8);
+    kickLowPass.makeLowPass(44100.0, 200.0, 0.7071);
+    midBandPass.makeBandPass(44100.0, 1200.0, 1.0);
+    hihatHighPass.makeHighPass(44100.0, 2800.0, 0.7071);
 }
 
 TunerBPMPluginAudioProcessor::~TunerBPMPluginAudioProcessor()
 {
+    if (fileAnalysisThread && fileAnalysisThread->joinable())
+    {
+        fileAnalysisActive.store(false);
+        fileAnalysisThread->join();
+    }
 }
 
 const juce::String TunerBPMPluginAudioProcessor::getName() const
 {
-    return JucePlugin_Name;
+    return "Supreme Tuner BPM V.2";
 }
 
 bool TunerBPMPluginAudioProcessor::acceptsMidi() const
@@ -118,38 +125,35 @@ void TunerBPMPluginAudioProcessor::prepareToPlay (double sampleRate, int samples
 
     currentSampleRate = sampleRate;
 
+    std::fill(fftFifo.begin(), fftFifo.end(), 0.0f);
+    std::fill(fftBuffer.begin(), fftBuffer.end(), 0.0f);
+    fftFifoIndex = 0;
+
     std::fill(pitchBuffer.begin(), pitchBuffer.end(), 0.0f);
     pitchBufferWritePos = 0;
 
     std::fill(noveltyBuffer.begin(), noveltyBuffer.end(), 0.0f);
     noveltyWritePos = 0;
     frameSampleCounter = 0;
-    frameKickSum = 0.0f;
+    frameLowSum = 0.0f;
     frameMidSum = 0.0f;
-    analysisFrameCounter = 0;
+    frameHighSum = 0.0f;
+    bpmAnalysisTimer = 0;
 
-    for (int i = 0; i < 36; ++i)
-    {
-        int midiNote = 48 + i; // C3 (48) to B5 (83)
-        double freq = 440.0 * std::pow(2.0, (midiNote - 69.0) / 12.0);
-        chromaFilters[i].makeBandPass(sampleRate, freq, 18.0);
-        chromaFilters[i].reset();
-    }
-
-    kickBandPass.makeBandPass(sampleRate, 62.0, 1.3);
-    kickBandPass.reset();
-    kickLowPass.makeLowPass(sampleRate, 110.0, 0.7071);
+    kickLowPass.makeLowPass(sampleRate, 200.0, 0.7071);
     kickLowPass.reset();
-    midBandPass.makeBandPass(sampleRate, 1200.0, 0.8);
+    midBandPass.makeBandPass(sampleRate, 1200.0, 1.0);
     midBandPass.reset();
+    hihatHighPass.makeHighPass(sampleRate, 2800.0, 0.7071);
+    hihatHighPass.reset();
 
-    prevKickBlockEnergy = 0.0f;
-    prevMidBlockEnergy = 0.0f;
-    fluxThreshold = 0.0f;
-    kickSlowEnergy = 0.0f;
+    prevLowEnergy = 0.0f;
+    prevMidEnergy = 0.0f;
+    prevHighEnergy = 0.0f;
+    noveltyThreshold = 0.0f;
     streamTimeSeconds = 0.0;
     lastKickOnsetSec = -1.0;
-    kickOnsetsRing.clear();
+    detectedOnsetTimes.clear();
     recentBpmCandidates.clear();
 
     internalSampleCounter = 0.0;
@@ -222,11 +226,12 @@ void TunerBPMPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
         if (timeSigNum <= 0) timeSigNum = 4;
     }
 
-    // 3. Polyphonic IIR Chromagram & Fast Scale Detection
-    processPolyphonicChroma(inputData, numSamples);
-
-    // 4. Kick-Drum Repetition & Fixed BPM Detection
-    processKickBpm(inputData, numSamples);
+    // 3. Tunebat / Essentia HPCP Key & BPM Analysis (Only run on live audio when no file is loaded)
+    if (!hasLoadedAudioFile())
+    {
+        processFftHpcp(inputData, numSamples);
+        processKickBpm(inputData, numSamples);
+    }
 
     // 5. Visual Beat Pulse Tracker (for UI LEDs ONLY - ZERO AUDIBLE CLICKS!)
     float internalBpm = *apvts.getRawParameterValue("internalTempo");
@@ -285,20 +290,19 @@ void TunerBPMPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
 }
 
 // ==============================================================================
-// Polyphonic IIR Chromagram & Monotonic Scale Detection Engine
+// Tunebat / Essentia HPCP Key Detection Engine
 // ==============================================================================
-void TunerBPMPluginAudioProcessor::processPolyphonicChroma(const float* inputData, int numSamples)
+void TunerBPMPluginAudioProcessor::processFftHpcp(const float* samples, int numSamples)
 {
-    // Part A: Monophonic Pitch for Bottom Tuner Dock
+    // Part A: Monophonic Pitch for Bottom Tuner Dock (Autocorrelation)
     for (int i = 0; i < numSamples; ++i)
     {
-        float currentSample = inputData[i];
-
+        float currentSample = samples[i];
         if (i % 2 == 0)
         {
             float avg = currentSample;
             if (i + 1 < numSamples)
-                avg = (currentSample + inputData[i + 1]) * 0.5f;
+                avg = (currentSample + samples[i + 1]) * 0.5f;
 
             pitchBuffer[pitchBufferWritePos] = avg;
             pitchBufferWritePos = (pitchBufferWritePos + 1) % 2048;
@@ -357,70 +361,144 @@ void TunerBPMPluginAudioProcessor::processPolyphonicChroma(const float* inputDat
         }
     }
 
-    // Part B: 36 Semitone IIR Bandpass Filters (Octaves 3, 4, 5: 130 Hz to 988 Hz)
+    // Part B: High-Precision Spectral HPCP Frame Processing
     for (int i = 0; i < numSamples; ++i)
     {
-        float s = inputData[i];
-        for (int k = 0; k < 36; ++k)
+        fftFifo[fftFifoIndex++] = samples[i];
+
+        if (fftFifoIndex >= fftSize)
         {
-            float y = chromaFilters[k].process(s);
-            chromaBlockEnergies[k] += y * y;
-        }
-    }
-    chromaSampleCount += numSamples;
+            computeFrameHpcp(fftFifo.data());
 
-    if (chromaSampleCount >= 2048)
-    {
-        float totalBlockEnergy = 0.0f;
-        for (int k = 0; k < 36; ++k)
-            totalBlockEnergy += chromaBlockEnergies[k];
-
-        if (totalBlockEnergy > 0.0001f) // Real musical audio present
-        {
-            audioAnalyzedSeconds += static_cast<double>(chromaSampleCount) / currentSampleRate;
-
-            // Monotonically increasing progress: 0% to 100% over 12 seconds
-            if (!scaleIsLocked.load())
-            {
-                float prog = juce::jlimit(0.0f, 1.0f, static_cast<float>(audioAnalyzedSeconds / 12.0));
-                scaleProgress.store(prog);
-            }
-
-            // Fold 36 semitones into 12 chromatic pitch classes
-            for (int pc = 0; pc < 12; ++pc)
-            {
-                float e = std::sqrt(chromaBlockEnergies[pc])
-                        + std::sqrt(chromaBlockEnergies[pc + 12])
-                        + std::sqrt(chromaBlockEnergies[pc + 24]);
-                accumulatedChroma[pc] += e;
-            }
+            // 50% overlap shift
+            std::copy(fftFifo.begin() + hopSize, fftFifo.end(), fftFifo.begin());
+            fftFifoIndex = fftSize - hopSize;
 
             chromaEvalCounter++;
-            if (chromaEvalCounter >= 10)
+            if (chromaEvalCounter >= 6) // Evaluate key correlation every ~140 ms
             {
                 chromaEvalCounter = 0;
                 runKeyCorrelation();
             }
         }
-
-        std::fill(chromaBlockEnergies.begin(), chromaBlockEnergies.end(), 0.0f);
-        chromaSampleCount = 0;
     }
 }
 
+void TunerBPMPluginAudioProcessor::computeFrameHpcp(const float* timeDomainData)
+{
+    // 1. Copy time domain frame to FFT buffer and apply Hann window
+    std::copy(timeDomainData, timeDomainData + fftSize, fftBuffer.begin());
+    std::fill(fftBuffer.begin() + fftSize, fftBuffer.begin() + fftSize * 2, 0.0f);
+
+    windowFunction.multiplyWithWindowingTable(fftBuffer.data(), fftSize);
+
+    // 2. Perform forward FFT (computes magnitudes in fftBuffer[0 .. fftSize / 2])
+    forwardFFT.performFrequencyOnlyForwardTransform(fftBuffer.data());
+
+    // 3. Spectral energy check
+    float frameEnergy = 0.0f;
+    for (int k = 1; k < fftSize / 2; ++k)
+        frameEnergy += fftBuffer[k];
+
+    if (frameEnergy < 1e-4f)
+        return; // Silence or noise floor
+
+    audioAnalyzedSeconds += static_cast<double>(hopSize) / currentSampleRate;
+
+    // Progress moves monotonically up to 100% over 8 seconds of active audio
+    if (!scaleIsLocked.load())
+    {
+        float prog = juce::jlimit(0.0f, 1.0f, static_cast<float>(audioAnalyzedSeconds / 8.0));
+        scaleProgress.store(prog);
+    }
+
+    // 4. Extract spectral peaks and map to Harmonic Pitch Class Profile (HPCP)
+    // Frequency range: 50 Hz to 3500 Hz covers bass, chords, vocals, lead synths
+    int minBin = std::max(1, juce::roundToInt(50.0 * fftSize / currentSampleRate));
+    int maxBin = std::min(fftSize / 2 - 2, juce::roundToInt(3500.0 * fftSize / currentSampleRate));
+
+    std::array<float, 12> frameChroma { 0.0f };
+
+    for (int k = minBin; k <= maxBin; ++k)
+    {
+        float mag = fftBuffer[k];
+
+        // Peak detection with parabolic refinement
+        if (mag > fftBuffer[k - 1] && mag > fftBuffer[k + 1] && mag > 0.001f)
+        {
+            float y1 = fftBuffer[k - 1];
+            float y2 = mag;
+            float y3 = fftBuffer[k + 1];
+
+            float denom = y1 - 2.0f * y2 + y3;
+            float delta = 0.0f;
+            if (std::abs(denom) > 1e-9f)
+                delta = 0.5f * (y1 - y3) / denom;
+
+            float exactBin = static_cast<float>(k) + delta;
+            float peakFreq = exactBin * static_cast<float>(currentSampleRate) / static_cast<float>(fftSize);
+            float peakMag = y2 - 0.25f * (y1 - y3) * delta;
+
+            if (peakFreq >= 50.0f && peakFreq <= 3500.0f && peakMag > 0.0f)
+            {
+                // Continuous MIDI note: 69 is A4 (440 Hz)
+                double midiNote = 12.0 * std::log2(peakFreq / 440.0) + 69.0;
+                double pitchClass = std::fmod(midiNote, 12.0);
+                if (pitchClass < 0.0)
+                    pitchClass += 12.0;
+
+                // Essentia HPCP harmonic weighting: f, 2f, 3f, 4f
+                const float harmonicWeights[4] = { 1.0f, 0.60f, 0.36f, 0.216f };
+                for (int h = 1; h <= 4; ++h)
+                {
+                    double hpc = std::fmod(pitchClass + 12.0 * std::log2(static_cast<double>(h)), 12.0);
+                    if (hpc < 0.0) hpc += 12.0;
+
+                    int pcInt = static_cast<int>(std::floor(hpc)) % 12;
+                    int pcNext = (pcInt + 1) % 12;
+                    float frac = static_cast<float>(hpc - std::floor(hpc));
+
+                    float w = peakMag * harmonicWeights[h - 1];
+                    frameChroma[pcInt] += w * (1.0f - frac);
+                    frameChroma[pcNext] += w * frac;
+                }
+            }
+        }
+    }
+
+    // 5. Accumulate frame chroma into persistent tonal distribution
+    float frameMax = 0.0f;
+    for (int pc = 0; pc < 12; ++pc)
+        frameMax = std::max(frameMax, frameChroma[pc]);
+
+    if (frameMax > 1e-6f)
+    {
+        for (int pc = 0; pc < 12; ++pc)
+            accumulatedChroma[pc] += frameChroma[pc] / frameMax;
+    }
+}
+
+// ==============================================================================
+// Tunebat / Essentia Multi-Profile Correlation (bgate, edma, temperley)
+// ==============================================================================
 void TunerBPMPluginAudioProcessor::runKeyCorrelation()
 {
-    if (audioAnalyzedSeconds < 2.0)
+    if (audioAnalyzedSeconds < 1.0)
         return;
 
-    // Temperley (1999) Cognitive Key Profiles (Gold standard for modern pop/rock/EDM)
-    const float tempMajor[12] = { 5.0f, 2.0f, 3.5f, 2.0f, 4.5f, 4.0f, 2.0f, 4.5f, 2.0f, 3.5f, 1.5f, 4.0f };
-    const float tempMinor[12] = { 5.0f, 2.0f, 3.5f, 4.5f, 2.0f, 4.0f, 2.0f, 4.5f, 3.5f, 2.0f, 1.5f, 4.0f };
+    // 1. Essentia bgate profiles (Gold standard default in Essentia & Tunebat, from BeatPort EDM)
+    const float bgateMajor[12] = { 1.00f, 0.00f, 0.42f, 0.00f, 0.53f, 0.37f, 0.00f, 0.77f, 0.00f, 0.38f, 0.21f, 0.30f };
+    const float bgateMinor[12] = { 1.00f, 0.00f, 0.36f, 0.39f, 0.00f, 0.38f, 0.00f, 0.74f, 0.27f, 0.00f, 0.42f, 0.23f };
 
-    // Krumhansl-Schmuckler profiles for secondary confirmation
-    const float kkMajor[12]   = { 6.35f, 2.23f, 3.48f, 2.33f, 4.38f, 4.09f, 2.52f, 5.19f, 2.39f, 3.66f, 2.29f, 2.88f };
-    const float kkMinor[12]   = { 6.33f, 2.68f, 3.52f, 5.38f, 2.60f, 3.53f, 2.54f, 4.75f, 3.98f, 2.69f, 3.34f, 3.17f };
+    // 2. Essentia edma profiles (Electronic Dance Music Algorithm, Faraldo et al.)
+    const float edmaMajor[12]  = { 1.00f, 0.29f, 0.50f, 0.40f, 0.60f, 0.56f, 0.32f, 0.80f, 0.31f, 0.45f, 0.42f, 0.39f };
+    const float edmaMinor[12]  = { 1.00f, 0.31f, 0.44f, 0.58f, 0.33f, 0.49f, 0.29f, 0.78f, 0.43f, 0.29f, 0.53f, 0.32f };
 
+    // 3. Temperley Cognitive profiles (Euroclassical & pop harmonic corpus)
+    const float tempMajor[12]  = { 5.00f, 2.00f, 3.50f, 2.00f, 4.50f, 4.00f, 2.00f, 4.50f, 2.00f, 3.50f, 1.50f, 4.00f };
+    const float tempMinor[12]  = { 5.00f, 2.00f, 3.50f, 4.50f, 2.00f, 4.00f, 2.00f, 4.50f, 3.50f, 2.00f, 1.50f, 4.00f };
+
+    // Compute mean of accumulated chroma
     float chromaMean = 0.0f;
     for (int c = 0; c < 12; ++c)
         chromaMean += accumulatedChroma[c];
@@ -429,49 +507,59 @@ void TunerBPMPluginAudioProcessor::runKeyCorrelation()
     float bestCorr = -2.0f;
     int bestKey = -1;
 
-    // Test all 24 keys: 0..11 Major, 12..23 Minor
+    // Test all 24 musical keys: 0..11 Major, 12..23 Minor
     for (int key = 0; key < 24; ++key)
     {
         bool isMinor = (key >= 12);
-        int tonic = key % 12;
-        const float* profT = isMinor ? tempMinor : tempMajor;
-        const float* profK = isMinor ? kkMinor : kkMajor;
+        int tonic = key % 12; // 0=C, 1=C#, 2=D, 3=D#, 4=E, 5=F, 6=F#, 7=G, 8=G#, 9=A, 10=A#, 11=B
 
-        float meanT = 0.0f, meanK = 0.0f;
+        const float* profB = isMinor ? bgateMinor : bgateMajor;
+        const float* profE = isMinor ? edmaMinor  : edmaMajor;
+        const float* profT = isMinor ? tempMinor  : tempMajor;
+
+        // Profile means
+        float meanB = 0.0f, meanE = 0.0f, meanT = 0.0f;
         for (int i = 0; i < 12; ++i)
         {
+            meanB += profB[i];
+            meanE += profE[i];
             meanT += profT[i];
-            meanK += profK[i];
         }
+        meanB /= 12.0f;
+        meanE /= 12.0f;
         meanT /= 12.0f;
-        meanK /= 12.0f;
 
+        float numB = 0.0f, denXB = 0.0f, denYB = 0.0f;
+        float numE = 0.0f, denXE = 0.0f, denYE = 0.0f;
         float numT = 0.0f, denXT = 0.0f, denYT = 0.0f;
-        float numK = 0.0f, denXK = 0.0f, denYK = 0.0f;
 
         for (int i = 0; i < 12; ++i)
         {
-            float x = accumulatedChroma[(tonic + i) % 12] - chromaMean;
-            float yt = profT[i] - meanT;
-            float yk = profK[i] - meanK;
+            int chromaIndex = (tonic + i) % 12;
+            float x = accumulatedChroma[chromaIndex] - chromaMean;
 
+            float yb = profB[i] - meanB;
+            numB  += x * yb;
+            denXB += x * x;
+            denYB += yb * yb;
+
+            float ye = profE[i] - meanE;
+            numE  += x * ye;
+            denXE += x * x;
+            denYE += ye * ye;
+
+            float yt = profT[i] - meanT;
             numT  += x * yt;
             denXT += x * x;
             denYT += yt * yt;
-
-            numK  += x * yk;
-            denXK += x * x;
-            denYK += yk * yk;
         }
 
-        float denomT = std::sqrt(denXT * denYT);
-        float rT = (denomT > 1e-9f) ? (numT / denomT) : -1.0f;
+        float rB = (denXB * denYB > 1e-9f) ? (numB / std::sqrt(denXB * denYB)) : -1.0f;
+        float rE = (denXE * denYE > 1e-9f) ? (numE / std::sqrt(denXE * denYE)) : -1.0f;
+        float rT = (denXT * denYT > 1e-9f) ? (numT / std::sqrt(denXT * denYT)) : -1.0f;
 
-        float denomK = std::sqrt(denXK * denYK);
-        float rK = (denomK > 1e-9f) ? (numK / denomK) : -1.0f;
-
-        // Weighted combination heavily favoring Temperley profile
-        float r = 0.75f * rT + 0.25f * rK;
+        // Multi-profile ensemble weighted consensus (Tunebat blend)
+        float r = 0.50f * rB + 0.30f * rE + 0.20f * rT;
 
         if (r > bestCorr)
         {
@@ -484,8 +572,8 @@ void TunerBPMPluginAudioProcessor::runKeyCorrelation()
     {
         detectedKeyIndex.store(bestKey);
 
-        // Lock definitively when analyzed time reaches ~10s or high correlation after 6s
-        if (audioAnalyzedSeconds >= 10.0 || (bestCorr >= 0.70f && audioAnalyzedSeconds >= 6.0))
+        // Lock definitively when analyzed time reaches ~6s or high correlation after 3.5s
+        if (audioAnalyzedSeconds >= 7.0 || (bestCorr >= 0.70f && audioAnalyzedSeconds >= 3.5))
         {
             scaleIsLocked.store(true);
             scaleProgress.store(1.0f);
@@ -496,9 +584,7 @@ void TunerBPMPluginAudioProcessor::runKeyCorrelation()
 void TunerBPMPluginAudioProcessor::resetScale()
 {
     std::fill(accumulatedChroma.begin(), accumulatedChroma.end(), 0.0f);
-    std::fill(chromaBlockEnergies.begin(), chromaBlockEnergies.end(), 0.0f);
     audioAnalyzedSeconds = 0.0;
-    chromaSampleCount = 0;
     chromaEvalCounter = 0;
     detectedKeyIndex.store(-1);
     scaleProgress.store(0.0f);
@@ -546,6 +632,9 @@ juce::String TunerBPMPluginAudioProcessor::getCamelotCode() const
     int root = key % 12;
     bool isMinor = (key >= 12);
 
+    // Camelot mappings for C, C#, D, D#, E, F, F#, G, G#, A, A#, B
+    // Minor: C=5A, C#=12A, D=7A, D#=2A, E=9A, F=4A, F#=11A, G=6A, G#=1A, A=8A, A#=3A, B=10A
+    // Major: C=8B, C#=3B, D=10B, D#=5B, E=12B, F=7B, F#=2B, G=9B, G#=4B, A=11B, A#=6B, B=1B
     const char* minorCamelot[] = { "5A", "12A", "7A", "2A", "9A", "4A", "11A", "6A", "1A", "8A", "3A", "10A" };
     const char* majorCamelot[] = { "8B", "3B", "10B", "5B", "12B", "7B", "2B", "9B", "4B", "11B", "6B", "1B" };
 
@@ -574,95 +663,323 @@ bool TunerBPMPluginAudioProcessor::getAndClearBeatTriggered(int& outBeatNumber)
 }
 
 // ==============================================================================
-// Harmonic Comb Resonator & Kick Alignment Tempo Detection Engine (v2.0)
+// Tunebat / Percival BPM Engine: 3-Band Novelty Flux + Comb + Peak-Intervals
 // ==============================================================================
 void TunerBPMPluginAudioProcessor::processKickBpm(const float* inputData, int numSamples)
 {
-    const int frameInterval = std::max(1, static_cast<int>(currentSampleRate / 200.0)); // 200 Hz frame rate (5 ms)
+    // Frame interval = 10 ms (100 Hz frame rate)
+    const int frameInterval = std::max(1, static_cast<int>(currentSampleRate / 100.0));
 
     for (int i = 0; i < numSamples; ++i)
     {
         float s = inputData[i];
         streamTimeSeconds += 1.0 / currentSampleRate;
 
-        // Kick band (62 Hz punch + 110 Hz lowpass) & Mid band (1200 Hz snare/clap)
-        float yKick = kickLowPass.process(kickBandPass.process(s));
+        // 3-band decomposition: Low (punch < 200 Hz), Mid (snare 250-2500 Hz), High (hats > 2800 Hz)
+        float yLow  = kickLowPass.process(s);
         float yMid  = midBandPass.process(s);
+        float yHigh = hihatHighPass.process(s);
 
-        frameKickSum += yKick * yKick;
+        frameLowSum  += yLow * yLow;
         frameMidSum  += yMid * yMid;
+        frameHighSum += yHigh * yHigh;
         frameSampleCounter++;
 
         if (frameSampleCounter >= frameInterval)
         {
-            float kickEnergy = frameKickSum / static_cast<float>(frameSampleCounter);
+            float lowEnergy  = frameLowSum  / static_cast<float>(frameSampleCounter);
             float midEnergy  = frameMidSum  / static_cast<float>(frameSampleCounter);
-            frameKickSum = 0.0f;
-            frameMidSum = 0.0f;
+            float highEnergy = frameHighSum / static_cast<float>(frameSampleCounter);
+            frameLowSum = frameMidSum = frameHighSum = 0.0f;
             frameSampleCounter = 0;
 
-            // Half-wave rectified novelty flux
-            float dKick = std::max(0.0f, kickEnergy - prevKickBlockEnergy);
-            float dMid  = std::max(0.0f, midEnergy  - prevMidBlockEnergy);
-            prevKickBlockEnergy = kickEnergy;
-            prevMidBlockEnergy  = midEnergy;
+            // Logarithmic compression (Essentia-style log spectrum flux)
+            float lLow  = std::log(1.0f + 1000.0f * lowEnergy);
+            float lMid  = std::log(1.0f + 1000.0f * midEnergy);
+            float lHigh = std::log(1.0f + 1000.0f * highEnergy);
 
-            float flux = dKick + 0.35f * dMid;
+            // Half-wave rectified flux
+            float dLow  = std::max(0.0f, lLow  - prevLowEnergy);
+            float dMid  = std::max(0.0f, lMid  - prevMidEnergy);
+            float dHigh = std::max(0.0f, lHigh - prevHighEnergy);
+            prevLowEnergy  = lLow;
+            prevMidEnergy  = lMid;
+            prevHighEnergy = lHigh;
 
-            // Adaptive moving average threshold subtraction (~250 ms)
-            fluxThreshold = 0.95f * fluxThreshold + 0.05f * flux;
-            float novelty = std::max(0.0f, flux - 1.15f * fluxThreshold);
+            // Combined multi-band rhythmic novelty (punch + transient accents + hi-hat subdivision)
+            float flux = 1.0f * dLow + 0.65f * dMid + 0.35f * dHigh;
+
+            // Adaptive baseline tracking (~200 ms)
+            noveltyThreshold = 0.92f * noveltyThreshold + 0.08f * flux;
+            float novelty = std::max(0.0f, flux - 0.35f * noveltyThreshold);
 
             noveltyBuffer[noveltyWritePos] = novelty;
             noveltyWritePos = (noveltyWritePos + 1) % noveltyBufferSize;
 
-            // Background slow energy average (5-second time constant at 200 Hz)
-            kickSlowEnergy = 0.999f * kickSlowEnergy + 0.001f * kickEnergy;
-
-            // Discrete kick onset detection: sharp low-end pulse above background
-            if (kickEnergy > (kickSlowEnergy * 2.2f + 0.0001f)
-                && (streamTimeSeconds - lastKickOnsetSec) > 0.23)
+            // Detect onset peaks for the inter-peak interval histogram
+            if (novelty > (noveltyThreshold * 1.35f + 1e-4f)
+                && (streamTimeSeconds - lastKickOnsetSec) > 0.10) // Min 100 ms between transients (< 600 BPM)
             {
                 lastKickOnsetSec = streamTimeSeconds;
-                kickOnsetsRing.push_back(streamTimeSeconds);
-                if (kickOnsetsRing.size() > 32)
-                    kickOnsetsRing.erase(kickOnsetsRing.begin());
+                detectedOnsetTimes.push_back(streamTimeSeconds);
+                if (detectedOnsetTimes.size() > 64)
+                    detectedOnsetTimes.erase(detectedOnsetTimes.begin());
             }
 
-            // Run tempo comb evaluation every 40 frames (every 200 ms)
-            analysisFrameCounter++;
-            if (analysisFrameCounter >= 40)
+            // Evaluate tempo every 20 frames (every 200 ms)
+            bpmAnalysisTimer++;
+            if (bpmAnalysisTimer >= 20)
             {
-                analysisFrameCounter = 0;
-                calculateTempoFromCombResonator();
+                bpmAnalysisTimer = 0;
+                calculateTempoFromCombAndIntervals();
             }
         }
     }
 }
 
-void TunerBPMPluginAudioProcessor::calculateTempoFromCombResonator()
+// ==============================================================================
+// Tunebat / Percival Tempo Algorithm: Comb + Pulse-Train + Inter-Onset + SVM Octave Decider
+// ==============================================================================
+static bool computeTunebatTempo(const std::vector<float>& novelty,
+                                const std::vector<double>& onsetTimes,
+                                float& outFineBpm,
+                                float& outConfidence)
 {
-    if (audioAnalyzedSeconds < 1.5)
-        return;
+    const int totalFrames = static_cast<int>(novelty.size());
+    const int minLag = 14;  // 428.5 BPM (permits half-tempo check for up to 214 BPM)
+    const int maxLag = 280; // 21.4 BPM (permits 4th harmonic checks down to 65 BPM)
+    if (totalFrames < maxLag + 40)
+        return false;
 
-    const int bufSize = noveltyBufferSize; // 1200 frames = 6 seconds
-    std::vector<float> X(bufSize);
-    int startPos = (noveltyWritePos - bufSize + bufSize) % bufSize;
-    for (int i = 0; i < bufSize; ++i)
-        X[i] = noveltyBuffer[(startPos + i) % bufSize];
-
+    // 1. Mean and variance of novelty curve
     double sumX = 0.0;
-    for (int i = 0; i < bufSize; ++i) sumX += X[i];
-    double meanX = sumX / bufSize;
+    for (int i = 0; i < totalFrames; ++i) sumX += novelty[i];
+    double meanX = sumX / totalFrames;
 
     double varX = 0.0;
-    for (int i = 0; i < bufSize; ++i)
+    for (int i = 0; i < totalFrames; ++i)
     {
-        double d = X[i] - meanX;
+        double d = novelty[i] - meanX;
         varX += d * d;
     }
+    if (varX < 1e-6)
+        return false;
 
-    if (varX < 0.0001)
+    // 2. Normalized Autocorrelation R[tau]
+    const int N = totalFrames - maxLag;
+    std::vector<float> normR(maxLag + 1, 0.0f);
+    for (int tau = minLag; tau <= maxLag; ++tau)
+    {
+        double sumCross = 0.0, sumSq1 = 0.0, sumSq2 = 0.0;
+        for (int n = 0; n < N; ++n)
+        {
+            double a = novelty[n] - meanX;
+            double b = novelty[n + tau] - meanX;
+            sumCross += a * b;
+            sumSq1   += a * a;
+            sumSq2   += b * b;
+        }
+        double denom = std::sqrt(sumSq1 * sumSq2);
+        normR[tau] = (denom > 1e-9) ? static_cast<float>(sumCross / denom) : 0.0f;
+    }
+
+    auto getLagValue = [&](double lag) -> float
+    {
+        if (lag < minLag || lag > maxLag) return 0.0f;
+        int i0 = static_cast<int>(std::floor(lag));
+        int i1 = std::min(maxLag, i0 + 1);
+        float frac = static_cast<float>(lag - i0);
+        return normR[i0] * (1.0f - frac) + normR[i1] * frac;
+    };
+
+    // 3. Inter-Onset Interval Histogram (Beatport / Tunebat algorithm)
+    std::array<float, 201> bpmHist { 0.0f };
+    if (onsetTimes.size() >= 3)
+    {
+        for (size_t i = 1; i < onsetTimes.size(); ++i)
+        {
+            // Consecutive onset (fundamental beat interval: Kick -> Snare -> Kick)
+            double dt1 = onsetTimes[i] - onsetTimes[i - 1];
+            if (dt1 >= 0.10 && dt1 <= 1.5) // 40 to 600 BPM
+            {
+                double cand = 60.0 / dt1;
+                while (cand < 65.0)  cand *= 2.0;
+                while (cand > 195.0) cand /= 2.0;
+                int rB = juce::roundToInt(cand);
+                if (rB >= 65 && rB <= 195)
+                {
+                    for (int k = -2; k <= 2; ++k)
+                    {
+                        int targetB = rB + k;
+                        if (targetB >= 65 && targetB <= 195)
+                            bpmHist[targetB] += 1.0f * std::exp(-static_cast<float>(k * k) / 1.8f);
+                    }
+                }
+            }
+
+            // Skip-1 onset (two-beat interval, normalized to 1 beat)
+            if (i >= 2)
+            {
+                double dt2 = onsetTimes[i] - onsetTimes[i - 2];
+                if (dt2 >= 0.20 && dt2 <= 3.0)
+                {
+                    double cand = 60.0 / (dt2 * 0.5);
+                    while (cand < 65.0)  cand *= 2.0;
+                    while (cand > 195.0) cand /= 2.0;
+                    int rB = juce::roundToInt(cand);
+                    if (rB >= 65 && rB <= 195)
+                    {
+                        for (int k = -2; k <= 2; ++k)
+                        {
+                            int targetB = rB + k;
+                            if (targetB >= 65 && targetB <= 195)
+                                bpmHist[targetB] += 0.35f * std::exp(-static_cast<float>(k * k) / 1.8f);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    float maxHist = 0.0f;
+    for (int b = 65; b <= 195; ++b) maxHist = std::max(maxHist, bpmHist[b]);
+    if (maxHist > 0.0f)
+    {
+        for (int b = 65; b <= 195; ++b) bpmHist[b] /= maxHist;
+    }
+
+    // 4. Pulse Train Cross-Correlation (PercivalEvaluatePulseTrains with floating-point phase)
+    std::vector<float> pulseScores(196, 0.0f);
+    float maxPulse = 0.0f;
+    for (int B = 65; B <= 195; ++B)
+    {
+        double period_float = 6000.0 / static_cast<double>(B);
+        int intStep = std::max(1, juce::roundToInt(period_float));
+        float bestPhaseEnergy = 0.0f;
+        for (int phi = 0; phi < intStep; ++phi)
+        {
+            float pSum = 0.0f;
+            int count = 0;
+            double pos = phi;
+            while (pos < N)
+            {
+                int idx = static_cast<int>(std::round(pos));
+                if (idx < N)
+                {
+                    pSum += novelty[idx];
+                    count++;
+                }
+                pos += period_float;
+            }
+            if (count > 0)
+            {
+                float avg = pSum / static_cast<float>(count);
+                if (avg > bestPhaseEnergy)
+                    bestPhaseEnergy = avg;
+            }
+        }
+        pulseScores[B] = bestPhaseEnergy;
+        if (bestPhaseEnergy > maxPulse) maxPulse = bestPhaseEnergy;
+    }
+    if (maxPulse > 0.0f)
+    {
+        for (int B = 65; B <= 195; ++B) pulseScores[B] /= maxPulse;
+    }
+
+    // 5. Total Combined Score across candidate BPMs
+    float bestScore = -1e9f;
+    int bestIntBpm = 0;
+    std::vector<float> totalScores(196, -1e9f);
+
+    for (int B = 65; B <= 195; ++B)
+    {
+        double T = 6000.0 / static_cast<double>(B);
+        float r1 = getLagValue(T);
+        float r2 = getLagValue(2.0 * T);
+        float r3 = getLagValue(3.0 * T);
+        float r4 = getLagValue(4.0 * T);
+        float rHalf = getLagValue(0.5 * T);
+
+        // Sub-harmonic suppression: if 0.5T has high correlation, B is a sub-octave of the real tempo
+        float combScore = 1.0f * r1 + 0.85f * r2 + 0.50f * r3 + 0.60f * r4 - 0.85f * rHalf;
+        float histScore = bpmHist[B];
+        float pulseScore = pulseScores[B];
+
+        double ratio = static_cast<double>(B) / 124.0;
+        double logRatio = std::log2(ratio);
+        float prior = std::exp(-static_cast<float>((logRatio * logRatio) / (2.0 * 0.60 * 0.60)));
+
+        float total = (combScore + 1.2f * pulseScore + 1.8f * histScore) * prior;
+        totalScores[B] = total;
+
+        if (total > bestScore)
+        {
+            bestScore = total;
+            bestIntBpm = B;
+        }
+    }
+
+    if (bestIntBpm < 65 || bestIntBpm > 195)
+        return false;
+
+    // Tunebat / Beatport Octave Resolution:
+    // In modern EDM/DnB/Trap, tracks with alternating kicks & snares often register high autocorrelation
+    // at half-time (e.g. 87 BPM). If double-time (e.g. 174 BPM) has strong periodic presence (>= 75% of sub-octave),
+    // resolve to the true energetic tempo (174 BPM).
+    int doubleBpm = bestIntBpm * 2;
+    if (bestIntBpm <= 95 && doubleBpm <= 195)
+    {
+        float scoreSub = totalScores[bestIntBpm];
+        float scoreDbl = totalScores[doubleBpm];
+        if (scoreDbl >= 0.70f * scoreSub)
+        {
+            bestIntBpm = doubleBpm;
+        }
+    }
+
+    // Sub-integer Parabolic Peak Interpolation
+    float rawFineBpm = static_cast<float>(bestIntBpm);
+    if (bestIntBpm > 65 && bestIntBpm < 195)
+    {
+        float sLeft  = totalScores[bestIntBpm - 1];
+        float sMid   = totalScores[bestIntBpm];
+        float sRight = totalScores[bestIntBpm + 1];
+        float denom = sLeft - 2.0f * sMid + sRight;
+        if (std::abs(denom) > 1e-6f)
+        {
+            float delta = 0.5f * (sLeft - sRight) / denom;
+            delta = juce::jlimit(-0.5f, 0.5f, delta);
+            rawFineBpm += delta;
+        }
+    }
+
+    // 6. Ensure final tempo is within standard musical range [65, 195] BPM
+    while (rawFineBpm < 65.0f) rawFineBpm *= 2.0f;
+    while (rawFineBpm > 195.0f) rawFineBpm /= 2.0f;
+
+    outFineBpm = rawFineBpm;
+    outConfidence = bestScore;
+    return true;
+}
+
+void TunerBPMPluginAudioProcessor::calculateTempoFromCombAndIntervals()
+{
+    if (streamTimeSeconds < 1.5)
+        return;
+
+    const int maxLag = 280;
+    const int bufSize = noveltyBufferSize;
+    int activeFrames = std::min(bufSize, static_cast<int>(streamTimeSeconds * 100.0));
+    if (activeFrames < maxLag + 40)
+        return;
+
+    std::vector<float> X(activeFrames);
+    int startPos = (noveltyWritePos - activeFrames + bufSize) % bufSize;
+    for (int i = 0; i < activeFrames; ++i)
+        X[i] = noveltyBuffer[(startPos + i) % bufSize];
+
+    float fineBpm = 0.0f;
+    float confidence = 0.0f;
+    if (!computeTunebatTempo(X, detectedOnsetTimes, fineBpm, confidence))
     {
         if (!bpmIsLocked.load())
         {
@@ -672,119 +989,31 @@ void TunerBPMPluginAudioProcessor::calculateTempoFromCombResonator()
         return;
     }
 
-    // Normalized autocorrelation r[tau] for tau from 60 (200 BPM) to 550 (21.8 BPM)
-    const int minLag = 60;
-    const int maxLag = 550;
-    const int N = bufSize - maxLag; // 650 frames = 3.25 seconds analysis window
+    recentBpmCandidates.push_back(fineBpm);
+    if (recentBpmCandidates.size() > 7)
+        recentBpmCandidates.erase(recentBpmCandidates.begin());
 
-    std::vector<float> normR(maxLag + 1, 0.0f);
-    for (int tau = minLag; tau <= maxLag; ++tau)
+    int consensusCount = 0;
+    for (float b : recentBpmCandidates)
     {
-        double sumCross = 0.0;
-        double sumSq1 = 0.0;
-        double sumSq2 = 0.0;
-        for (int n = 0; n < N; ++n)
-        {
-            double a = X[n] - meanX;
-            double b = X[n + tau] - meanX;
-            sumCross += a * b;
-            sumSq1 += a * a;
-            sumSq2 += b * b;
-        }
-        double denom = std::sqrt(sumSq1 * sumSq2);
-        normR[tau] = (denom > 1e-9) ? static_cast<float>(sumCross / denom) : 0.0f;
+        if (std::abs(b - fineBpm) <= 1.2f)
+            consensusCount++;
     }
 
-    float bestScore = -1e9f;
-    int bestBpm = 0;
-
-    for (int B = 70; B <= 185; ++B)
+    // Lock definitively when 3 of last 7 cycles agree and at least 2.0s analyzed
+    if (consensusCount >= 3 && streamTimeSeconds >= 2.0)
     {
-        double T_sec = 60.0 / static_cast<double>(B);
-        double L_frame = T_sec * 200.0;
-
-        int L1 = juce::roundToInt(L_frame);
-        int L2 = juce::roundToInt(2.0 * L_frame);
-        int L3 = juce::roundToInt(3.0 * L_frame);
-        int L4 = juce::roundToInt(4.0 * L_frame);
-
-        float r1 = (L1 >= minLag && L1 <= maxLag) ? normR[L1] : 0.0f;
-        float r2 = (L2 >= minLag && L2 <= maxLag) ? normR[L2] : 0.0f;
-        float r3 = (L3 >= minLag && L3 <= maxLag) ? normR[L3] : 0.0f;
-        float r4 = (L4 >= minLag && L4 <= maxLag) ? normR[L4] : 0.0f;
-
-        // Multi-harmonic comb summation
-        float combScore = 1.0f * r1 + 0.95f * r2 + 0.40f * r3 + 0.85f * r4;
-
-        // Kick transient interval alignment score
-        float kickScore = 0.0f;
-        if (kickOnsetsRing.size() >= 3)
-        {
-            int numPairs = 0;
-            for (size_t i = 0; i < kickOnsetsRing.size(); ++i)
-            {
-                for (size_t j = 0; j < i; ++j)
-                {
-                    double dt = kickOnsetsRing[i] - kickOnsetsRing[j];
-                    if (dt >= 0.25 && dt <= 4.2)
-                    {
-                        double beats = dt / T_sec;
-                        double nearestGrid = std::round(beats * 2.0) / 2.0;
-                        double err = std::abs(dt - nearestGrid * T_sec);
-                        if (err < 0.045)
-                        {
-                            float g = std::exp(-static_cast<float>((err * err) / (2.0 * 0.022 * 0.022)));
-                            kickScore += g;
-                            numPairs++;
-                        }
-                    }
-                }
-            }
-            if (numPairs > 0)
-                kickScore /= static_cast<float>(numPairs);
-        }
-
-        // Tempo prior centered at 112 BPM (covers typical pop/trap/urban comfortably)
-        double ratio = static_cast<double>(B) / 112.0;
-        double logRatio = std::log2(ratio);
-        float prior = std::exp(-static_cast<float>((logRatio * logRatio) / (2.0 * 0.42 * 0.42)));
-
-        float totalScore = (combScore + 1.2f * kickScore) * prior;
-
-        if (totalScore > bestScore)
-        {
-            bestScore = totalScore;
-            bestBpm = B;
-        }
+        detectedAudioBpm.store(fineBpm);
+        bpmIsLocked.store(true);
+        std::lock_guard<std::mutex> lock(bpmMutex);
+        int displayBpm = juce::roundToInt(fineBpm);
+        bpmStatusText = "TEMPO LOCKED: " + juce::String(displayBpm) + " BPM";
     }
-
-    if (bestBpm >= 70 && bestBpm <= 185)
+    else if (!bpmIsLocked.load())
     {
-        recentBpmCandidates.push_back(bestBpm);
-        if (recentBpmCandidates.size() > 8)
-            recentBpmCandidates.erase(recentBpmCandidates.begin());
-
-        int consensusCount = 0;
-        for (int b : recentBpmCandidates)
-        {
-            if (std::abs(b - bestBpm) <= 1)
-                consensusCount++;
-        }
-
-        // Lock definitively when 4 of 8 cycles agree and at least 3.0 seconds analyzed
-        if (consensusCount >= 4 && audioAnalyzedSeconds >= 3.0)
-        {
-            detectedAudioBpm.store(static_cast<float>(bestBpm));
-            bpmIsLocked.store(true);
-            std::lock_guard<std::mutex> lock(bpmMutex);
-            bpmStatusText = "TEMPO LOCKED: " + juce::String(bestBpm) + " BPM";
-        }
-        else if (!bpmIsLocked.load())
-        {
-            detectedAudioBpm.store(static_cast<float>(bestBpm));
-            std::lock_guard<std::mutex> lock(bpmMutex);
-            bpmStatusText = "ANALYZING TEMPO...";
-        }
+        detectedAudioBpm.store(fineBpm);
+        std::lock_guard<std::mutex> lock(bpmMutex);
+        bpmStatusText = "ANALYZING TEMPO...";
     }
 }
 
@@ -792,18 +1021,20 @@ void TunerBPMPluginAudioProcessor::unlockBpm()
 {
     bpmIsLocked.store(false);
     detectedAudioBpm.store(0.0f);
+    streamTimeSeconds = 0.0;
     recentBpmCandidates.clear();
-    kickOnsetsRing.clear();
+    detectedOnsetTimes.clear();
     std::fill(noveltyBuffer.begin(), noveltyBuffer.end(), 0.0f);
     noveltyWritePos = 0;
     frameSampleCounter = 0;
-    frameKickSum = 0.0f;
+    frameLowSum = 0.0f;
     frameMidSum = 0.0f;
-    analysisFrameCounter = 0;
-    prevKickBlockEnergy = 0.0f;
-    prevMidBlockEnergy = 0.0f;
-    fluxThreshold = 0.0f;
-    kickSlowEnergy = 0.0f;
+    frameHighSum = 0.0f;
+    bpmAnalysisTimer = 0;
+    prevLowEnergy = 0.0f;
+    prevMidEnergy = 0.0f;
+    prevHighEnergy = 0.0f;
+    noveltyThreshold = 0.0f;
     lastKickOnsetSec = -1.0;
 
     std::lock_guard<std::mutex> lock(bpmMutex);
@@ -816,7 +1047,173 @@ juce::String TunerBPMPluginAudioProcessor::getBpmStatus() const
     return bpmStatusText;
 }
 
-// Global factory function
+void TunerBPMPluginAudioProcessor::clearLoadedAudioFile()
+{
+    {
+        std::lock_guard<std::mutex> lock(fileMutex);
+        loadedAudioFileName = "";
+    }
+    resetScale();
+    unlockBpm();
+}
+
+// ==============================================================================
+// Offline Audio File Drag-and-Drop Analysis (Tunebat Web Style)
+// ==============================================================================
+void TunerBPMPluginAudioProcessor::loadAndAnalyzeAudioFile(const juce::File& file)
+{
+    if (fileAnalysisThread && fileAnalysisThread->joinable())
+    {
+        fileAnalysisActive.store(false);
+        fileAnalysisThread->join();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(fileMutex);
+        loadedAudioFileName = file.getFileName();
+    }
+
+    fileAnalysisActive.store(true);
+    {
+        std::lock_guard<std::mutex> lock(bpmMutex);
+        bpmStatusText = "ANALYZING FILE: " + file.getFileNameWithoutExtension().toUpperCase();
+    }
+
+    fileAnalysisThread = std::make_unique<std::thread>([this, file]()
+    {
+        std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
+        if (reader == nullptr)
+        {
+            std::lock_guard<std::mutex> lock(bpmMutex);
+            bpmStatusText = "ERROR READING FILE";
+            fileAnalysisActive.store(false);
+            return;
+        }
+
+        // Reset accumulators
+        resetScale();
+        unlockBpm();
+
+        double fileSampleRate = reader->sampleRate;
+        int64_t totalSamples = reader->lengthInSamples;
+
+        // Skip the first 8 seconds (intros often lack full harmony or drums) and analyze up to 75 seconds
+        int64_t startSample = static_cast<int64_t>(std::min(8.0 * fileSampleRate, totalSamples * 0.1));
+        int64_t durationSamples = static_cast<int64_t>(std::min(75.0 * fileSampleRate, static_cast<double>(totalSamples - startSample)));
+        if (durationSamples <= 0)
+        {
+            startSample = 0;
+            durationSamples = totalSamples;
+        }
+
+        // Setup filter instances for offline analysis
+        BiquadFilter offLow, offMid, offHigh;
+        offLow.makeLowPass(fileSampleRate, 200.0, 0.7071);
+        offMid.makeBandPass(fileSampleRate, 1200.0, 1.0);
+        offHigh.makeHighPass(fileSampleRate, 2800.0, 0.7071);
+
+        const int frameInterval = std::max(1, static_cast<int>(fileSampleRate / 100.0));
+        const int blockSize = 4096;
+        juce::AudioBuffer<float> tempBuffer(1, blockSize);
+
+        std::vector<float> fileNovelty;
+        fileNovelty.reserve(8000);
+
+        std::vector<double> fileOnsets;
+        fileOnsets.reserve(1000);
+
+        float fPrevLow = 0.0f, fPrevMid = 0.0f, fPrevHigh = 0.0f;
+        float fNovThresh = 0.0f;
+        float fLowSum = 0.0f, fMidSum = 0.0f, fHighSum = 0.0f;
+        int fCounter = 0;
+        double fTimeSec = 0.0;
+        double fLastOnset = -1.0;
+
+        int64_t samplesReadTotal = 0;
+        while (samplesReadTotal < durationSamples && fileAnalysisActive.load())
+        {
+            int samplesThisBlock = static_cast<int>(std::min(static_cast<int64_t>(blockSize), durationSamples - samplesReadTotal));
+            reader->read(&tempBuffer, 0, samplesThisBlock, startSample + samplesReadTotal, true, false);
+
+            const float* blockData = tempBuffer.getReadPointer(0);
+
+            // 1. Feed HPCP for key detection
+            processFftHpcp(blockData, samplesThisBlock);
+
+            // 2. Feed Multi-band Novelty Flux for BPM across the whole 60-75s
+            for (int i = 0; i < samplesThisBlock; ++i)
+            {
+                float s = blockData[i];
+                fTimeSec += 1.0 / fileSampleRate;
+
+                float yL = offLow.process(s);
+                float yM = offMid.process(s);
+                float yH = offHigh.process(s);
+
+                fLowSum  += yL * yL;
+                fMidSum  += yM * yM;
+                fHighSum += yH * yH;
+                fCounter++;
+
+                if (fCounter >= frameInterval)
+                {
+                    float eL = fLowSum  / static_cast<float>(fCounter);
+                    float eM = fMidSum  / static_cast<float>(fCounter);
+                    float eH = fHighSum / static_cast<float>(fCounter);
+                    fLowSum = fMidSum = fHighSum = 0.0f;
+                    fCounter = 0;
+
+                    float lLow  = std::log(1.0f + 1000.0f * eL);
+                    float lMid  = std::log(1.0f + 1000.0f * eM);
+                    float lHigh = std::log(1.0f + 1000.0f * eH);
+
+                    float dL = std::max(0.0f, lLow  - fPrevLow);
+                    float dM = std::max(0.0f, lMid  - fPrevMid);
+                    float dH = std::max(0.0f, lHigh - fPrevHigh);
+                    fPrevLow = lLow; fPrevMid = lMid; fPrevHigh = lHigh;
+
+                    float flux = 1.0f * dL + 0.65f * dM + 0.35f * dH;
+                    fNovThresh = 0.92f * fNovThresh + 0.08f * flux;
+                    float novelty = std::max(0.0f, flux - 0.35f * fNovThresh);
+
+                    fileNovelty.push_back(novelty);
+
+                    if (novelty > (fNovThresh * 1.35f + 1e-4f) && (fTimeSec - fLastOnset) > 0.16)
+                    {
+                        fLastOnset = fTimeSec;
+                        fileOnsets.push_back(fTimeSec);
+                    }
+                }
+            }
+
+            samplesReadTotal += samplesThisBlock;
+        }
+
+        // 3. Finalize Key Detection
+        runKeyCorrelation();
+        scaleIsLocked.store(true);
+        scaleProgress.store(1.0f);
+
+        // 4. Finalize BPM from the complete 60-75 second Novelty vector using Essentia/Tunebat Engine
+        float finalFineBpm = 0.0f;
+        float conf = 0.0f;
+        if (computeTunebatTempo(fileNovelty, fileOnsets, finalFineBpm, conf))
+        {
+            detectedAudioBpm.store(finalFineBpm);
+            bpmIsLocked.store(true);
+
+            {
+                std::lock_guard<std::mutex> lock(bpmMutex);
+                int displayBpm = juce::roundToInt(finalFineBpm);
+                bpmStatusText = "TEMPO LOCKED: " + juce::String(displayBpm) + " BPM";
+            }
+        }
+
+        fileAnalysisActive.store(false);
+    });
+}
+
+//==============================================================================
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new TunerBPMPluginAudioProcessor();

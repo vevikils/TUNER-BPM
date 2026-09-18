@@ -22,16 +22,16 @@ FetchContent_MakeAvailable(juce)
 
 # Create the Audio Plugin
 juce_add_plugin(TunerBPMPlugin
-    COMPANY_NAME "vevi"
+    COMPANY_NAME "Vevi"
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT FALSE
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS TRUE
     COPY_AFTER_BUILD OFF
-    PLUGIN_NAME "STT2"
-    PRODUCT_NAME "STT2"
-    PLUGIN_CODE "Stt2"
+    PLUGIN_NAME "Supreme Tuner BPM V.2"
+    PRODUCT_NAME "Supreme Tuner BPM V.2"
+    PLUGIN_CODE "Stb2"
     PLUGIN_MANUFACTURER_CODE "Vevi"
     VERSION "2.0.0"
     FORMATS VST3 Standalone
@@ -51,6 +51,8 @@ target_sources(TunerBPMPlugin PRIVATE
 # Link necessary modules
 target_link_libraries(TunerBPMPlugin PRIVATE
     juce::juce_audio_utils
+    juce::juce_audio_formats
+    juce::juce_dsp
     juce::juce_graphics
     juce::juce_gui_basics
     juce::juce_gui_extra
@@ -64,3 +66,26 @@ target_compile_definitions(TunerBPMPlugin PRIVATE
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
 )
+
+# Automated DSP Verification Target
+juce_add_console_app(DSPTest PRODUCT_NAME "DSPTest")
+juce_generate_juce_header(DSPTest)
+target_sources(DSPTest PRIVATE
+    Source/DSPTest.cpp
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp
+)
+target_link_libraries(DSPTest PRIVATE
+    juce::juce_audio_utils
+    juce::juce_audio_formats
+    juce::juce_dsp
+    juce::juce_graphics
+    juce::juce_gui_basics
+    juce::juce_gui_extra
+)
+target_compile_definitions(DSPTest PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JucePlugin_Name="SupremeTunerBPMV2"
+)
+

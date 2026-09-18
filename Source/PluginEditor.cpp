@@ -22,6 +22,31 @@ namespace StudioStyle {
     const juce::Colour accentMint       { 0xFF34D399 }; // Precision lock emerald
     const juce::Colour accentCyan       { 0xFF38BDF8 }; // Acoustic tempo cyan
     const juce::Colour accentAmber      { 0xFFFBBF24 }; // Tuner cents gold
+    const juce::Colour accentRose       { 0xFFF43F5E }; // Eject button coral/rose
+}
+
+// ==============================================================================
+// Camelot Color Palette (Authentic Harmonic Mixing Wheel)
+// ==============================================================================
+static juce::Colour getCamelotColor(const juce::String& code)
+{
+    int num = code.retainCharacters("0123456789").getIntValue();
+    switch (num)
+    {
+        case 1:  return juce::Colour(0xFF00D2B4); // 1A/1B: Aqua
+        case 2:  return juce::Colour(0xFF00B4FF); // 2A/2B: Sky Blue
+        case 3:  return juce::Colour(0xFF387BFF); // 3A/3B: Deep Blue
+        case 4:  return juce::Colour(0xFF7B5CFF); // 4A/4B: Indigo
+        case 5:  return juce::Colour(0xFFA855F7); // 5A/5B: Magenta
+        case 6:  return juce::Colour(0xFFEC4899); // 6A/6B: Rose Pink
+        case 7:  return juce::Colour(0xFFEF4444); // 7A/7B: Coral Red
+        case 8:  return juce::Colour(0xFFF97316); // 8A/8B: Orange-Red
+        case 9:  return juce::Colour(0xFFF59E0B); // 9A/9B: Amber
+        case 10: return juce::Colour(0xFFEAB308); // 10A/10B: Gold
+        case 11: return juce::Colour(0xFF84CC16); // 11A/11B: Lime
+        case 12: return juce::Colour(0xFF10B981); // 12A/12B: Emerald
+        default: return StudioStyle::accentViolet;
+    }
 }
 
 // ==============================================================================
@@ -52,7 +77,7 @@ public:
         g.drawHorizontalLine(static_cast<int>(bounds.getY() + 1.0f), bounds.getX() + 4.0f, bounds.getRight() - 4.0f);
 
         // Hairline outline
-        g.setColour(StudioStyle::cardBorder.withAlpha(shouldDrawButtonAsHighlighted ? 0.40f : 0.22f));
+        g.setColour(StudioStyle::cardBorder.withAlpha(shouldDrawButtonAsHighlighted ? 0.45f : 0.25f));
         g.drawRoundedRectangle(bounds, cornerRadius, 1.0f);
     }
 
@@ -94,7 +119,7 @@ static void drawStudioCard(juce::Graphics& g, juce::Rectangle<float> bounds,
     g.drawRoundedRectangle(bounds, corner, 1.0f);
 
     // Specular highlight on top edge
-    juce::ColourGradient sheen(juce::Colours::white.withAlpha(0.10f), bounds.getCentreX(), bounds.getY(),
+    juce::ColourGradient sheen(juce::Colours::white.withAlpha(0.12f), bounds.getCentreX(), bounds.getY(),
                                juce::Colours::transparentWhite, bounds.getRight() - 20.0f, bounds.getY(), true);
     g.setGradientFill(sheen);
     g.drawHorizontalLine(static_cast<int>(bounds.getY() + 1.0f), bounds.getX() + corner, bounds.getRight() - corner);
@@ -103,14 +128,16 @@ static void drawStudioCard(juce::Graphics& g, juce::Rectangle<float> bounds,
     float padX = bounds.getX() + 18.0f;
     float padY = bounds.getY() + 14.0f;
 
-    // Small status pip
+    // Small status pip with subtle aura
+    g.setColour(accentCol.withAlpha(0.35f));
+    g.fillEllipse(padX - 2.0f, padY + 1.0f, 10.0f, 10.0f);
     g.setColour(accentCol);
     g.fillEllipse(padX, padY + 3.0f, 6.0f, 6.0f);
 
     g.setColour(StudioStyle::textMuted);
-    g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
+    g.setFont(juce::FontOptions(9.5f, juce::Font::bold));
     g.drawText(category.toUpperCase(),
-               static_cast<int>(padX + 12.0f), static_cast<int>(padY), 160, 12,
+               static_cast<int>(padX + 14.0f), static_cast<int>(padY), 200, 12,
                juce::Justification::centredLeft);
 }
 
@@ -120,20 +147,39 @@ static void drawStudioCard(juce::Graphics& g, juce::Rectangle<float> bounds,
 TunerBPMPluginAudioProcessorEditor::TunerBPMPluginAudioProcessorEditor(TunerBPMPluginAudioProcessor& p)
     : AudioProcessorEditor(&p), audioProcessor(p)
 {
-    setSize(680, 336);
+    setSize(780, 400);
     std::fill(std::begin(oscilloscopeData), std::end(oscilloscopeData), 0.0f);
+
+    // Open Audio File Button (Tunebat Web feature)
+    openFileButton.setButtonText("OPEN FILE");
+    openFileButton.setLookAndFeel(&studioLAF);
+    openFileButton.setColour(juce::TextButton::textColourOffId, StudioStyle::accentCyan);
+    openFileButton.onClick = [this] { triggerOpenFileDialog(); };
+    addAndMakeVisible(openFileButton);
+
+    // Eject Loaded File Button (Returns to Live DAW Monitoring)
+    ejectFileButton.setButtonText("EJECT / LIVE");
+    ejectFileButton.setLookAndFeel(&studioLAF);
+    ejectFileButton.setColour(juce::TextButton::textColourOffId, StudioStyle::accentRose);
+    ejectFileButton.onClick = [this] {
+        audioProcessor.clearLoadedAudioFile();
+        repaint();
+    };
+    addChildComponent(ejectFileButton); // Initially hidden if no file loaded
 
     // Master Reset Button
     resetAllButton.setButtonText("RESET");
     resetAllButton.setLookAndFeel(&studioLAF);
     resetAllButton.setColour(juce::TextButton::textColourOffId, StudioStyle::textBody);
     resetAllButton.onClick = [this] {
+        audioProcessor.clearLoadedAudioFile();
         audioProcessor.resetScale();
         audioProcessor.unlockBpm();
+        repaint();
     };
     addAndMakeVisible(resetAllButton);
 
-    // Kick Re-detect Button
+    // BPM Re-detect Button
     unlockBpmButton.setButtonText("RE-CALC");
     unlockBpmButton.setLookAndFeel(&studioLAF);
     unlockBpmButton.setColour(juce::TextButton::textColourOffId, StudioStyle::accentCyan);
@@ -145,8 +191,67 @@ TunerBPMPluginAudioProcessorEditor::TunerBPMPluginAudioProcessorEditor(TunerBPMP
 
 TunerBPMPluginAudioProcessorEditor::~TunerBPMPluginAudioProcessorEditor()
 {
+    openFileButton.setLookAndFeel(nullptr);
+    ejectFileButton.setLookAndFeel(nullptr);
     resetAllButton.setLookAndFeel(nullptr);
     unlockBpmButton.setLookAndFeel(nullptr);
+}
+
+// ==============================================================================
+// File Drag-and-Drop Implementation (Tunebat Analyzer Style)
+// ==============================================================================
+bool TunerBPMPluginAudioProcessorEditor::isInterestedInFileDrag(const juce::StringArray& files)
+{
+    for (auto& file : files)
+    {
+        juce::String ext = juce::File(file).getFileExtension().toLowerCase();
+        if (ext == ".wav" || ext == ".mp3" || ext == ".flac" || ext == ".aif" || ext == ".aiff" || ext == ".ogg" || ext == ".m4a")
+            return true;
+    }
+    return false;
+}
+
+void TunerBPMPluginAudioProcessorEditor::filesDropped(const juce::StringArray& files, int x, int y)
+{
+    juce::ignoreUnused(x, y);
+    isFileHovering = false;
+    if (files.size() > 0)
+    {
+        juce::File audioFile(files[0]);
+        if (audioFile.existsAsFile())
+            audioProcessor.loadAndAnalyzeAudioFile(audioFile);
+    }
+    repaint();
+}
+
+void TunerBPMPluginAudioProcessorEditor::fileDragEnter(const juce::StringArray& files, int x, int y)
+{
+    juce::ignoreUnused(files, x, y);
+    isFileHovering = true;
+    repaint();
+}
+
+void TunerBPMPluginAudioProcessorEditor::fileDragExit(const juce::StringArray& files)
+{
+    juce::ignoreUnused(files);
+    isFileHovering = false;
+    repaint();
+}
+
+void TunerBPMPluginAudioProcessorEditor::triggerOpenFileDialog()
+{
+    fileChooser = std::make_unique<juce::FileChooser>(
+        "Select an Audio File to Analyze (WAV, MP3, FLAC, AIFF, OGG, M4A)...",
+        juce::File::getSpecialLocation(juce::File::userMusicDirectory),
+        "*.wav;*.mp3;*.flac;*.aif;*.aiff;*.ogg;*.m4a");
+
+    auto chooserFlags = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles;
+    fileChooser->launchAsync(chooserFlags, [this](const juce::FileChooser& fc)
+    {
+        auto file = fc.getResult();
+        if (file.existsAsFile())
+            audioProcessor.loadAndAnalyzeAudioFile(file);
+    });
 }
 
 // ==============================================================================
@@ -155,63 +260,131 @@ void TunerBPMPluginAudioProcessorEditor::paint(juce::Graphics& g)
     const int W = getWidth();
     const int H = getHeight();
 
-    // ══ AMBIENT BACKGROUND (Obsidian Studio Sheen) ════════════════════════════
+    // ══ AMBIENT BACKGROUND (Deep Obsidian Studio Sheen) ══════════════════════
     juce::ColourGradient bgGrad(StudioStyle::bgSheen, 0.0f, 0.0f,
                                 StudioStyle::bgDeep, 0.0f, static_cast<float>(H), false);
     g.setGradientFill(bgGrad);
     g.fillAll();
 
     // ══ HEADER (Masterpiece Pro Branding) ═════════════════════════════════════
-    const float headerH = 48.0f;
+    const float headerH = 46.0f;
     float hX = 20.0f;
 
-    // Logo: STT2
+    // Logo: SUPREME TUNER BPM
     g.setColour(StudioStyle::textHero);
-    g.setFont(juce::FontOptions(22.0f, juce::Font::bold));
-    g.drawText("STT2", static_cast<int>(hX), 0, 62, static_cast<int>(headerH), juce::Justification::centredLeft);
+    g.setFont(juce::FontOptions(16.5f, juce::Font::bold));
+    g.drawText("SUPREME TUNER BPM", static_cast<int>(hX), 0, 190, static_cast<int>(headerH), juce::Justification::centredLeft);
 
     // Version Pill Badge: V.2
-    float v2X = hX + 65.0f;
-    float v2Y = (headerH - 20.0f) * 0.5f;
-    juce::Rectangle<float> v2Badge(v2X, v2Y, 36.0f, 20.0f);
-    g.setColour(StudioStyle::accentCyan.withAlpha(0.12f));
+    float v2X = hX + 195.0f;
+    float v2Y = (headerH - 22.0f) * 0.5f;
+    juce::Rectangle<float> v2Badge(v2X, v2Y, 44.0f, 22.0f);
+    g.setColour(StudioStyle::accentCyan.withAlpha(0.15f));
     g.fillRoundedRectangle(v2Badge, 6.0f);
-    g.setColour(StudioStyle::accentCyan.withAlpha(0.45f));
+    g.setColour(StudioStyle::accentCyan.withAlpha(0.60f));
     g.drawRoundedRectangle(v2Badge, 6.0f, 1.0f);
 
     g.setColour(StudioStyle::accentCyan);
-    g.setFont(juce::FontOptions(10.5f, juce::Font::bold));
+    g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
     g.drawText("V.2", v2Badge, juce::Justification::centred);
 
     // Vertical Hairline Divider
-    float divX = v2X + 46.0f;
+    float divX = v2X + 54.0f;
     g.setColour(StudioStyle::cardBorder);
-    g.drawVerticalLine(static_cast<int>(divX), 14.0f, headerH - 14.0f);
+    g.drawVerticalLine(static_cast<int>(divX), 13.0f, headerH - 13.0f);
 
-    // Masterpiece Brand Logo: SUPREME TEMPO & TUNER - BY VEVI
+    // Brand Subtitle
     float brandX = divX + 14.0f;
-    g.setColour(StudioStyle::textHero);
-    g.setFont(juce::FontOptions(10.0f, juce::Font::bold));
-    g.drawText("SUPREME TEMPO & TUNER", static_cast<int>(brandX), 0, 175, static_cast<int>(headerH), juce::Justification::centredLeft);
-
-    g.setColour(StudioStyle::accentCyan);
+    g.setColour(StudioStyle::textMuted);
     g.setFont(juce::FontOptions(9.5f, juce::Font::bold));
-    g.drawText("— BY VEVI", static_cast<int>(brandX + 176.0f), 0, 90, static_cast<int>(headerH), juce::Justification::centredLeft);
+    g.drawText("HARMONIC & TEMPO SUITE", static_cast<int>(brandX), 0, 160, static_cast<int>(headerH), juce::Justification::centredLeft);
+
+    // ══ LOADED FILE BANNER RIBBON (Dedicated High-End Status Bar) ══════════════
+    const float pad = 12.0f;
+    const float bannerY = 48.0f;
+    const float bannerH = 32.0f;
+    const float bannerW = static_cast<float>(W) - pad * 2.0f;
+    juce::Rectangle<float> bannerRect(pad, bannerY, bannerW, bannerH);
+
+    bool hasFile = currentLoadedFileName.isNotEmpty();
+
+    // Banner Glass Background
+    g.setColour(StudioStyle::cardSurfaceTop.withAlpha(hasFile ? 0.65f : 0.35f));
+    g.fillRoundedRectangle(bannerRect, 8.0f);
+    g.setColour(hasFile ? StudioStyle::accentMint.withAlpha(0.35f) : StudioStyle::cardBorder);
+    g.drawRoundedRectangle(bannerRect, 8.0f, 1.0f);
+
+    if (hasFile)
+    {
+        // Music note icon
+        float iconX = pad + 14.0f;
+        g.setColour(StudioStyle::accentMint);
+        g.setFont(juce::FontOptions(14.0f, juce::Font::bold));
+        g.drawText(juce::String::charToString(0x266B), static_cast<int>(iconX), static_cast<int>(bannerY), 18, static_cast<int>(bannerH), juce::Justification::centredLeft);
+
+        // "LOADED FILE:" Tag
+        g.setColour(StudioStyle::accentMint);
+        g.setFont(juce::FontOptions(9.5f, juce::Font::bold));
+        g.drawText("LOADED FILE:", static_cast<int>(iconX + 22.0f), static_cast<int>(bannerY), 85, static_cast<int>(bannerH), juce::Justification::centredLeft);
+
+        // File Name
+        g.setColour(StudioStyle::textHero);
+        g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+        g.drawText(currentLoadedFileName, static_cast<int>(iconX + 110.0f), static_cast<int>(bannerY), static_cast<int>(bannerW - 240.0f), static_cast<int>(bannerH), juce::Justification::centredLeft);
+
+        // Status tag (Offline Analyzed)
+        float tagW = 120.0f;
+        float tagX = bannerRect.getRight() - 110.0f - tagW;
+        g.setColour(StudioStyle::accentMint.withAlpha(0.12f));
+        juce::Rectangle<float> tagPill(tagX, bannerY + 6.0f, tagW, 20.0f);
+        g.fillRoundedRectangle(tagPill, 10.0f);
+        g.setColour(StudioStyle::accentMint.withAlpha(0.40f));
+        g.drawRoundedRectangle(tagPill, 10.0f, 1.0f);
+        g.setColour(StudioStyle::accentMint);
+        g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
+        g.drawText("OFFLINE ANALYZED", tagPill, juce::Justification::centred);
+    }
+    else if (isAnalyzingFile)
+    {
+        // Pulsing loader banner
+        g.setColour(StudioStyle::accentCyan);
+        g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+        g.drawText("ANALYZING AUDIO FILE: EXTRACTING HARMONICS & TEMPO...", bannerRect, juce::Justification::centred);
+    }
+    else
+    {
+        // Live DAW Monitoring Mode Hint
+        float iconX = pad + 14.0f;
+        g.setColour(StudioStyle::accentCyan);
+        g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+        g.drawText(juce::String::charToString(0x25C6), static_cast<int>(iconX), static_cast<int>(bannerY), 16, static_cast<int>(bannerH), juce::Justification::centredLeft);
+
+        g.setColour(StudioStyle::accentCyan);
+        g.setFont(juce::FontOptions(9.5f, juce::Font::bold));
+        g.drawText("LIVE DAW MONITORING", static_cast<int>(iconX + 18.0f), static_cast<int>(bannerY), 140, static_cast<int>(bannerH), juce::Justification::centredLeft);
+
+        g.setColour(StudioStyle::cardBorder);
+        g.drawVerticalLine(static_cast<int>(iconX + 164.0f), bannerY + 8.0f, bannerY + bannerH - 8.0f);
+
+        g.setColour(StudioStyle::textMuted);
+        g.setFont(juce::FontOptions(10.0f, juce::Font::plain));
+        g.drawText("Listening to live track audio. Drag & Drop any audio file (WAV, MP3, FLAC, AIFF) to analyze offline.",
+                   static_cast<int>(iconX + 176.0f), static_cast<int>(bannerY), static_cast<int>(bannerW - 200.0f), static_cast<int>(bannerH), juce::Justification::centredLeft);
+    }
 
     // ══ HERO SECTION (Two Balanced Luxury Cards) ══════════════════════════════
-    const float pad = 12.0f;
-    const float heroY = headerH + 2.0f;
-    const float heroH = 214.0f;
+    const float heroY = bannerY + bannerH + 8.0f;
+    const float heroH = 224.0f;
     const float cardW = (static_cast<float>(W) - pad * 3.0f) * 0.5f;
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 1. LEFT CARD: MUSICAL SCALE & KEY (Armonía)
+    // 1. LEFT CARD: MUSICAL SCALE & KEY (Tunebat HPCP Key Detector)
     // ─────────────────────────────────────────────────────────────────────────
     juce::Rectangle<float> scaleCard(pad, heroY, cardW, heroH);
-    drawStudioCard(g, scaleCard, "Harmonic Key Detector",
+    drawStudioCard(g, scaleCard, "Harmonic Key & Scale (Tunebat HPCP)",
                    isScaleLocked ? StudioStyle::accentMint : StudioStyle::accentViolet);
 
-    float sx = scaleCard.getX() + 18.0f;
+    float sx = scaleCard.getX() + 20.0f;
     float sy = scaleCard.getY() + 38.0f;
     bool hasScale = (currentScaleName != "Detecting...");
 
@@ -219,30 +392,52 @@ void TunerBPMPluginAudioProcessorEditor::paint(juce::Graphics& g)
     juce::Colour scaleColor = isScaleLocked ? StudioStyle::accentMint :
                               (hasScale ? StudioStyle::accentViolet : StudioStyle::textMuted);
     g.setColour(scaleColor);
-    g.setFont(juce::FontOptions(34.0f, juce::Font::bold));
-    g.drawText(currentScaleName, static_cast<int>(sx), static_cast<int>(sy), static_cast<int>(cardW - 36.0f), 42, juce::Justification::centredLeft);
+    g.setFont(juce::FontOptions(36.0f, juce::Font::bold));
+    g.drawText(currentScaleName, static_cast<int>(sx), static_cast<int>(sy), static_cast<int>(cardW - 40.0f), 44, juce::Justification::centredLeft);
 
     // Camelot & Relative Key Glass Capsule
-    sy += 48.0f;
-    float pillW = cardW - 36.0f;
-    juce::Rectangle<float> infoPill(sx, sy, pillW, 30.0f);
+    sy += 50.0f;
+    float pillW = cardW - 40.0f;
+    juce::Rectangle<float> infoPill(sx, sy, pillW, 34.0f);
 
-    g.setColour(StudioStyle::cardSurfaceTop.withAlpha(0.60f));
-    g.fillRoundedRectangle(infoPill, 15.0f);
+    g.setColour(StudioStyle::cardSurfaceTop.withAlpha(0.70f));
+    g.fillRoundedRectangle(infoPill, 17.0f);
     g.setColour(StudioStyle::cardBorder);
-    g.drawRoundedRectangle(infoPill, 15.0f, 1.0f);
+    g.drawRoundedRectangle(infoPill, 17.0f, 1.0f);
 
-    juce::String infoText = hasScale ? ("CAMELOT  " + currentCamelot + "   •   RELATIVE  " + currentRelativeKey.toUpperCase())
-                                     : "LISTENING TO CHORD HARMONICS...";
-    g.setColour(hasScale ? StudioStyle::textHero : StudioStyle::textMuted);
-    g.setFont(juce::FontOptions(10.5f, juce::Font::bold));
-    g.drawText(infoText, infoPill, juce::Justification::centred);
+    if (hasScale)
+    {
+        // Dedicated Camelot Badge with Authentic Wheel Color
+        float camW = 46.0f;
+        juce::Rectangle<float> camBadge(sx + 5.0f, sy + 4.0f, camW, 26.0f);
+        juce::Colour camCol = getCamelotColor(currentCamelot);
+        g.setColour(camCol.withAlpha(0.18f));
+        g.fillRoundedRectangle(camBadge, 13.0f);
+        g.setColour(camCol.withAlpha(0.65f));
+        g.drawRoundedRectangle(camBadge, 13.0f, 1.0f);
 
-    // Monotonic Analysis Progress Bar (Never goes backwards!)
-    sy += 48.0f;
+        g.setColour(camCol);
+        g.setFont(juce::FontOptions(11.5f, juce::Font::bold));
+        g.drawText(currentCamelot, camBadge, juce::Justification::centred);
+
+        // Relative Key Label
+        g.setColour(StudioStyle::textHero);
+        g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+        juce::String relText = "RELATIVE: " + currentRelativeKey.toUpperCase();
+        g.drawText(relText, static_cast<int>(sx + camW + 16.0f), static_cast<int>(sy), static_cast<int>(pillW - camW - 20.0f), 34, juce::Justification::centredLeft);
+    }
+    else
+    {
+        g.setColour(StudioStyle::textMuted);
+        g.setFont(juce::FontOptions(10.5f, juce::Font::bold));
+        g.drawText("LISTENING TO CHORD HARMONICS...", infoPill, juce::Justification::centred);
+    }
+
+    // Monotonic Analysis Progress Bar
+    sy += 52.0f;
     g.setColour(StudioStyle::textMuted);
     g.setFont(juce::FontOptions(9.5f, juce::Font::bold));
-    g.drawText("ANALYSIS PROGRESS", static_cast<int>(sx), static_cast<int>(sy), 140, 12, juce::Justification::left);
+    g.drawText("HARMONIC CONFIDENCE", static_cast<int>(sx), static_cast<int>(sy), 160, 12, juce::Justification::left);
 
     float progClamped = juce::jlimit(0.0f, 1.0f, currentScaleProgress);
     juce::String pctStr = isScaleLocked ? "LOCKED (100%)" : (juce::String(juce::roundToInt(progClamped * 100.0f)) + "%");
@@ -250,97 +445,96 @@ void TunerBPMPluginAudioProcessorEditor::paint(juce::Graphics& g)
     g.setFont(juce::FontOptions(9.5f, juce::Font::bold));
     g.drawText(pctStr, static_cast<int>(sx), static_cast<int>(sy), static_cast<int>(pillW), 12, juce::Justification::right);
 
-    float barY = sy + 16.0f;
+    float barY = sy + 18.0f;
     g.setColour(StudioStyle::cardBorder.withAlpha(0.35f));
-    g.fillRoundedRectangle(sx, barY, pillW, 4.0f, 2.0f);
+    g.fillRoundedRectangle(sx, barY, pillW, 5.0f, 2.5f);
 
     if (progClamped > 0.001f)
     {
         juce::Colour barCol = isScaleLocked ? StudioStyle::accentMint : StudioStyle::accentViolet;
         g.setColour(barCol);
-        g.fillRoundedRectangle(sx, barY, pillW * progClamped, 4.0f, 2.0f);
+        g.fillRoundedRectangle(sx, barY, pillW * progClamped, 5.0f, 2.5f);
 
-        // Soft micro-glow at edge
         if (!isScaleLocked && progClamped < 0.99f)
         {
             float tipX = sx + pillW * progClamped;
-            g.setColour(barCol.withAlpha(0.6f));
-            g.fillEllipse(tipX - 3.0f, barY - 1.0f, 6.0f, 6.0f);
+            g.setColour(barCol.withAlpha(0.7f));
+            g.fillEllipse(tipX - 4.0f, barY - 1.5f, 8.0f, 8.0f);
         }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 2. RIGHT CARD: TEMPO & KICK REPETITION BPM (Ritmo)
+    // 2. RIGHT CARD: TEMPO & KICK REPETITION BPM (Tunebat Percival Engine)
     // ─────────────────────────────────────────────────────────────────────────
     float rx = scaleCard.getRight() + pad;
     juce::Rectangle<float> bpmCard(rx, heroY, cardW, heroH);
-    drawStudioCard(g, bpmCard, "Kick Tempo Reference",
+    drawStudioCard(g, bpmCard, "Acoustic Tempo (Tunebat Engine)",
                    isBpmLocked ? StudioStyle::accentMint : StudioStyle::accentCyan);
 
     // Discrete Beat LEDs (Top Right)
-    float ledsX = bpmCard.getRight() - 86.0f;
-    float ledsY = bpmCard.getY() + 15.0f;
-    bool isPlaying = audioProcessor.isHostPlaying();
+    float ledsX = bpmCard.getRight() - 92.0f;
+    float ledsY = bpmCard.getY() + 14.0f;
+    bool isPlaying = audioProcessor.isHostPlaying() || (currentAudioBpm > 0.0f);
     for (int b = 1; b <= 4; ++b)
     {
-        float lx = ledsX + static_cast<float>(b - 1) * 16.0f;
+        float lx = ledsX + static_cast<float>(b - 1) * 18.0f;
         bool lit = isPlaying && (b == currentBeatNum);
         juce::Colour ledCol = (b == 1) ? StudioStyle::accentMint : StudioStyle::accentCyan;
 
         g.setColour(lit ? ledCol : StudioStyle::cardBorder);
-        g.fillEllipse(lx, ledsY, 6.0f, 6.0f);
+        g.fillEllipse(lx, ledsY, 7.0f, 7.0f);
         if (lit && beatFlashLevel > 0.0f)
         {
-            g.setColour(ledCol.withAlpha(beatFlashLevel * 0.40f));
-            g.drawEllipse(lx - 2.5f, ledsY - 2.5f, 11.0f, 11.0f, 1.0f);
+            g.setColour(ledCol.withAlpha(beatFlashLevel * 0.45f));
+            g.drawEllipse(lx - 3.0f, ledsY - 3.0f, 13.0f, 13.0f, 1.0f);
         }
     }
 
-    float bx = bpmCard.getX() + 18.0f;
+    float bx = bpmCard.getX() + 20.0f;
     float by = bpmCard.getY() + 38.0f;
 
-    // Giant Fixed BPM Hero Numeral (SF Pro 46pt bold)
+    // Giant Fixed BPM Hero Numeral
     juce::String bpmStr = (currentAudioBpm > 0.0f) ? juce::String(juce::roundToInt(currentAudioBpm)) : "---";
     g.setColour(isBpmLocked ? StudioStyle::accentMint : (currentAudioBpm > 0.0f ? StudioStyle::accentCyan : StudioStyle::textMuted));
-    g.setFont(juce::FontOptions(46.0f, juce::Font::bold));
-    g.drawText(bpmStr, static_cast<int>(bx), static_cast<int>(by), 125, 46, juce::Justification::centredLeft);
+    g.setFont(juce::FontOptions(48.0f, juce::Font::bold));
+    g.drawText(bpmStr, static_cast<int>(bx), static_cast<int>(by), 135, 48, juce::Justification::centredLeft);
 
     // BPM Unit and Lock Subscript
-    float tagX = bx + 124.0f;
+    float tagX = bx + 134.0f;
     g.setColour(StudioStyle::textHero);
-    g.setFont(juce::FontOptions(14.0f, juce::Font::bold));
-    g.drawText("BPM", static_cast<int>(tagX), static_cast<int>(by + 8.0f), 50, 16, juce::Justification::left);
+    g.setFont(juce::FontOptions(15.0f, juce::Font::bold));
+    g.drawText("BPM", static_cast<int>(tagX), static_cast<int>(by + 8.0f), 55, 16, juce::Justification::left);
 
     g.setColour(isBpmLocked ? StudioStyle::accentMint : StudioStyle::textMuted);
-    g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
-    g.drawText(isBpmLocked ? "FIXED LOCK" : (currentAudioBpm > 0.0f ? "ANALYZING" : "SEARCHING"), static_cast<int>(tagX), static_cast<int>(by + 26.0f), 80, 14, juce::Justification::left);
+    g.setFont(juce::FontOptions(9.5f, juce::Font::bold));
+    g.drawText(isBpmLocked ? "FIXED LOCK" : (currentAudioBpm > 0.0f ? "ANALYZING" : "SEARCHING"), static_cast<int>(tagX), static_cast<int>(by + 28.0f), 90, 14, juce::Justification::left);
 
-    // Status Capsule Badge
+    // Status Capsule Badge with Re-calc Button Inside
     by += 54.0f;
-    float statusW = cardW - 36.0f;
-    juce::Rectangle<float> statusRect(bx, by, statusW, 30.0f);
+    float statusW = cardW - 40.0f;
+    juce::Rectangle<float> statusRect(bx, by, statusW, 34.0f);
 
     juce::Colour statusCol = isBpmLocked ? StudioStyle::accentMint : StudioStyle::accentCyan;
-    g.setColour(statusCol.withAlpha(0.09f));
-    g.fillRoundedRectangle(statusRect, 15.0f);
-    g.setColour(statusCol.withAlpha(0.28f));
-    g.drawRoundedRectangle(statusRect, 15.0f, 1.0f);
+    g.setColour(statusCol.withAlpha(0.10f));
+    g.fillRoundedRectangle(statusRect, 17.0f);
+    g.setColour(statusCol.withAlpha(0.30f));
+    g.drawRoundedRectangle(statusRect, 17.0f, 1.0f);
 
     // Status Indicator Dot
     g.setColour(statusCol);
-    g.fillEllipse(bx + 12.0f, by + 10.5f, 8.0f, 8.0f);
+    g.fillEllipse(bx + 14.0f, by + 12.0f, 10.0f, 10.0f);
     if (isBpmLocked)
     {
-        g.setColour(statusCol.withAlpha(0.35f));
-        g.drawEllipse(bx + 9.5f, by + 8.0f, 13.0f, 13.0f, 1.0f);
+        g.setColour(statusCol.withAlpha(0.40f));
+        g.drawEllipse(bx + 11.5f, by + 9.5f, 15.0f, 15.0f, 1.0f);
     }
 
-    g.setFont(juce::FontOptions(10.5f, juce::Font::bold));
+    g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
     g.setColour(StudioStyle::textHero);
-    g.drawText(bpmStatus.toUpperCase(), static_cast<int>(bx + 28.0f), static_cast<int>(by), static_cast<int>(statusW - 105.0f), 30, juce::Justification::centredLeft);
+    g.drawText(bpmStatus.toUpperCase(), static_cast<int>(bx + 32.0f), static_cast<int>(by), static_cast<int>(statusW - 115.0f), 34, juce::Justification::centredLeft);
 
     // DAW Host Reference Row
-    by += 46.0f;
+    by += 50.0f;
     g.setColour(StudioStyle::textMuted);
     g.setFont(juce::FontOptions(9.5f, juce::Font::bold));
     g.drawText("DAW PROJECT SYNC", static_cast<int>(bx), static_cast<int>(by), 150, 12, juce::Justification::left);
@@ -351,7 +545,7 @@ void TunerBPMPluginAudioProcessorEditor::paint(juce::Graphics& g)
     g.drawText(juce::String(audioProcessor.getTempo(), 1) + " BPM", static_cast<int>(bx), static_cast<int>(by), 150, 18, juce::Justification::left);
 
     // ══ BOTTOM RIBBON: ACOUSTIC GLASS DOCK (Tuner + Oscilloscope) ═════════════
-    float dockY = heroY + heroH + pad;
+    float dockY = heroY + heroH + 8.0f;
     float dockH = static_cast<float>(H) - dockY - pad;
     juce::Rectangle<float> dockRect(pad, dockY, static_cast<float>(W) - pad * 2.0f, dockH);
 
@@ -369,21 +563,21 @@ void TunerBPMPluginAudioProcessorEditor::paint(juce::Graphics& g)
                                    : StudioStyle::textMuted;
 
     g.setColour(noteCol);
-    g.setFont(juce::FontOptions(19.0f, juce::Font::bold));
-    g.drawText(hasNote ? activeNoteName : "---", static_cast<int>(nx), static_cast<int>(dockY), 54, static_cast<int>(dockH), juce::Justification::centredLeft);
+    g.setFont(juce::FontOptions(22.0f, juce::Font::bold));
+    g.drawText(hasNote ? activeNoteName : "---", static_cast<int>(nx), static_cast<int>(dockY), 60, static_cast<int>(dockH), juce::Justification::centredLeft);
 
     // Center-Left: Precision Cents Calibration Meter
-    float gaugeX = nx + 58.0f;
-    float gaugeW = 105.0f;
-    float gaugeY = dockY + dockH * 0.5f - 2.5f;
+    float gaugeX = nx + 68.0f;
+    float gaugeW = 120.0f;
+    float gaugeY = dockY + dockH * 0.5f - 3.0f;
 
     // Track
-    g.setColour(StudioStyle::cardBorder.withAlpha(0.3f));
-    g.fillRoundedRectangle(gaugeX, gaugeY, gaugeW, 5.0f, 2.5f);
+    g.setColour(StudioStyle::cardBorder.withAlpha(0.35f));
+    g.fillRoundedRectangle(gaugeX, gaugeY, gaugeW, 6.0f, 3.0f);
 
     // Center Zero Pip
-    g.setColour(StudioStyle::accentMint.withAlpha(0.6f));
-    g.drawVerticalLine(static_cast<int>(gaugeX + gaugeW * 0.5f), gaugeY - 2.0f, gaugeY + 7.0f);
+    g.setColour(StudioStyle::accentMint.withAlpha(0.70f));
+    g.drawVerticalLine(static_cast<int>(gaugeX + gaugeW * 0.5f), gaugeY - 3.0f, gaugeY + 9.0f);
 
     // Moving Needle Indicator
     if (hasNote)
@@ -391,11 +585,11 @@ void TunerBPMPluginAudioProcessorEditor::paint(juce::Graphics& g)
         float centsClamped = juce::jlimit(-50.0f, 50.0f, smoothedCents);
         float indX = gaugeX + gaugeW * 0.5f + (centsClamped / 50.0f) * (gaugeW * 0.46f);
         g.setColour(noteCol);
-        g.fillRoundedRectangle(indX - 2.0f, gaugeY - 2.0f, 4.0f, 9.0f, 2.0f);
+        g.fillRoundedRectangle(indX - 2.5f, gaugeY - 3.0f, 5.0f, 12.0f, 2.5f);
     }
 
     // Right Section: Organic Luminous Oscilloscope Line
-    float oscX = gaugeX + gaugeW + 30.0f;
+    float oscX = gaugeX + gaugeW + 36.0f;
     float oscW = static_cast<float>(W) - pad - oscX - 18.0f;
     float oscY = dockY + 6.0f;
     float oscH = dockH - 12.0f;
@@ -414,17 +608,37 @@ void TunerBPMPluginAudioProcessorEditor::paint(juce::Graphics& g)
     }
 
     // Pass 1: Soft Ambient Glow
-    g.setColour(StudioStyle::accentCyan.withAlpha(0.20f));
-    g.strokePath(wavePath, juce::PathStrokeType(3.0f));
+    g.setColour(StudioStyle::accentCyan.withAlpha(0.22f));
+    g.strokePath(wavePath, juce::PathStrokeType(3.5f));
 
     // Pass 2: Razor Crisp Luminous Trace
-    g.setColour(StudioStyle::accentCyan.withAlpha(0.85f));
-    g.strokePath(wavePath, juce::PathStrokeType(1.2f));
+    g.setColour(StudioStyle::accentCyan.withAlpha(0.90f));
+    g.strokePath(wavePath, juce::PathStrokeType(1.4f));
 
     // Micro Watermark
     g.setColour(StudioStyle::textMuted.withAlpha(0.40f));
     g.setFont(juce::FontOptions(8.5f, juce::Font::bold));
-    g.drawText("STT2 v2.0 • PRO", static_cast<int>(oscX), static_cast<int>(dockY + dockH - 14.0f), static_cast<int>(oscW), 10, juce::Justification::bottomRight);
+    g.drawText("SUPREME TUNER BPM V.2 • TUNEBAT ENGINE", static_cast<int>(oscX), static_cast<int>(dockY + dockH - 14.0f), static_cast<int>(oscW), 10, juce::Justification::bottomRight);
+
+    // ══ DRAG & DROP HOVER OVERLAY (Tunebat Web Glass Dropzone) ════════════════
+    if (isFileHovering)
+    {
+        auto area = getLocalBounds().toFloat().reduced(8.0f);
+        g.setColour(juce::Colours::black.withAlpha(0.85f));
+        g.fillRoundedRectangle(area, 14.0f);
+
+        // Dashed glowing border
+        g.setColour(StudioStyle::accentCyan);
+        g.drawRoundedRectangle(area, 14.0f, 2.0f);
+
+        g.setColour(StudioStyle::textHero);
+        g.setFont(juce::FontOptions(20.0f, juce::Font::bold));
+        g.drawText("DROP AUDIO FILE HERE TO ANALYZE", area.reduced(20.0f), juce::Justification::centred);
+
+        g.setColour(StudioStyle::accentCyan);
+        g.setFont(juce::FontOptions(12.5f, juce::Font::bold));
+        g.drawText("TUNEBAT ESSENTIA HPCP KEY & ACOUSTIC BPM ENGINE", area.removeFromBottom(area.getHeight() * 0.38f), juce::Justification::centredTop);
+    }
 }
 
 // ==============================================================================
@@ -432,18 +646,23 @@ void TunerBPMPluginAudioProcessorEditor::resized()
 {
     const int W = getWidth();
     const float pad = 12.0f;
-    const float headerH = 48.0f;
-    const float heroY = headerH + 2.0f;
+    const float bannerY = 48.0f;
+    const float heroY = bannerY + 32.0f + 8.0f;
     const float cardW = (static_cast<float>(W) - pad * 3.0f) * 0.5f;
 
-    // Reset button in Header (Top Right)
-    resetAllButton.setBounds(W - 76, 12, 60, 24);
+    // Top Header Buttons
+    resetAllButton.setBounds(W - 80, 11, 68, 24);
+    openFileButton.setBounds(W - 176, 11, 88, 24);
+
+    // Eject Button inside the Loaded File Banner (Right side of banner)
+    ejectFileButton.setBounds(W - static_cast<int>(pad) - 96, static_cast<int>(bannerY + 4.0f), 90, 24);
 
     // Re-calc button inside BPM Card (Right-aligned in status pill row)
     float rx = pad + cardW + pad;
-    float bx = rx + 18.0f;
-    float statusW = cardW - 36.0f;
-    unlockBpmButton.setBounds(static_cast<int>(bx + statusW - 74.0f), static_cast<int>(heroY + 95.0f), 68, 24);
+    float bx = rx + 20.0f;
+    float statusW = cardW - 40.0f;
+    float by = heroY + 92.0f;
+    unlockBpmButton.setBounds(static_cast<int>(bx + statusW - 76.0f), static_cast<int>(by + 4.0f), 70, 26);
 }
 
 // ==============================================================================
@@ -465,6 +684,11 @@ void TunerBPMPluginAudioProcessorEditor::timerCallback()
     isBpmLocked     = audioProcessor.isBpmLocked();
     bpmStatus       = audioProcessor.getBpmStatus();
 
+    // Audio File State
+    currentLoadedFileName = audioProcessor.getLoadedAudioFileName();
+    isAnalyzingFile       = audioProcessor.isAnalyzingFile();
+    ejectFileButton.setVisible(currentLoadedFileName.isNotEmpty());
+
     // Beat Pulse Animation (Visual only)
     int beatNum = 1;
     if (audioProcessor.getAndClearBeatTriggered(beatNum))
@@ -474,7 +698,7 @@ void TunerBPMPluginAudioProcessorEditor::timerCallback()
     }
     else
     {
-        beatFlashLevel *= 0.85f;
+        beatFlashLevel *= 0.88f;
         if (beatFlashLevel < 0.01f) beatFlashLevel = 0.0f;
     }
 
