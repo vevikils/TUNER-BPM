@@ -65,6 +65,9 @@ target_compile_definitions(TunerBPMPlugin PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
+    JUCE_USE_FLAC=1
+    JUCE_USE_OGGVORBIS=1
+    JUCE_USE_WINDOWS_MEDIA_FORMAT=1
 )
 
 # Automated DSP Verification Target

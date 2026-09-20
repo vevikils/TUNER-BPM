@@ -51,8 +51,17 @@ TunerBPMPluginAudioProcessor::TunerBPMPluginAudioProcessor()
     recentBpmCandidates.reserve(16);
     detectedOnsetTimes.reserve(64);
 
-    // Register audio formats for drag-and-drop file analyzer
+    // Register audio formats for drag-and-drop file analyzer (WAV, AIFF, FLAC, OGG, MP3/M4A/WMA)
     formatManager.registerBasicFormats();
+   #if JUCE_USE_FLAC
+    formatManager.registerFormat(new juce::FlacAudioFormat(), false);
+   #endif
+   #if JUCE_USE_OGGVORBIS
+    formatManager.registerFormat(new juce::OggVorbisAudioFormat(), false);
+   #endif
+   #if JUCE_WINDOWS
+    formatManager.registerFormat(new juce::WindowsMediaAudioFormat(), false);
+   #endif
 
     kickLowPass.makeLowPass(44100.0, 200.0, 0.7071);
     midBandPass.makeBandPass(44100.0, 1200.0, 1.0);
@@ -61,9 +70,10 @@ TunerBPMPluginAudioProcessor::TunerBPMPluginAudioProcessor()
 
 TunerBPMPluginAudioProcessor::~TunerBPMPluginAudioProcessor()
 {
+    ++currentJobId;
+    fileAnalysisActive.store(false);
     if (fileAnalysisThread && fileAnalysisThread->joinable())
     {
-        fileAnalysisActive.store(false);
         fileAnalysisThread->join();
     }
 }
@@ -481,11 +491,8 @@ void TunerBPMPluginAudioProcessor::computeFrameHpcp(const float* timeDomainData)
 // ==============================================================================
 // Tunebat / Essentia Multi-Profile Correlation (bgate, edma, temperley)
 // ==============================================================================
-void TunerBPMPluginAudioProcessor::runKeyCorrelation()
+static int correlateKeyProfile(const std::array<float, 12>& chroma, float* outBestCorr = nullptr)
 {
-    if (audioAnalyzedSeconds < 1.0)
-        return;
-
     // 1. Essentia bgate profiles (Gold standard default in Essentia & Tunebat, from BeatPort EDM)
     const float bgateMajor[12] = { 1.00f, 0.00f, 0.42f, 0.00f, 0.53f, 0.37f, 0.00f, 0.77f, 0.00f, 0.38f, 0.21f, 0.30f };
     const float bgateMinor[12] = { 1.00f, 0.00f, 0.36f, 0.39f, 0.00f, 0.38f, 0.00f, 0.74f, 0.27f, 0.00f, 0.42f, 0.23f };
@@ -498,26 +505,23 @@ void TunerBPMPluginAudioProcessor::runKeyCorrelation()
     const float tempMajor[12]  = { 5.00f, 2.00f, 3.50f, 2.00f, 4.50f, 4.00f, 2.00f, 4.50f, 2.00f, 3.50f, 1.50f, 4.00f };
     const float tempMinor[12]  = { 5.00f, 2.00f, 3.50f, 4.50f, 2.00f, 4.00f, 2.00f, 4.50f, 3.50f, 2.00f, 1.50f, 4.00f };
 
-    // Compute mean of accumulated chroma
     float chromaMean = 0.0f;
     for (int c = 0; c < 12; ++c)
-        chromaMean += accumulatedChroma[c];
+        chromaMean += chroma[c];
     chromaMean /= 12.0f;
 
     float bestCorr = -2.0f;
     int bestKey = -1;
 
-    // Test all 24 musical keys: 0..11 Major, 12..23 Minor
     for (int key = 0; key < 24; ++key)
     {
         bool isMinor = (key >= 12);
-        int tonic = key % 12; // 0=C, 1=C#, 2=D, 3=D#, 4=E, 5=F, 6=F#, 7=G, 8=G#, 9=A, 10=A#, 11=B
+        int tonic = key % 12;
 
         const float* profB = isMinor ? bgateMinor : bgateMajor;
         const float* profE = isMinor ? edmaMinor  : edmaMajor;
         const float* profT = isMinor ? tempMinor  : tempMajor;
 
-        // Profile means
         float meanB = 0.0f, meanE = 0.0f, meanT = 0.0f;
         for (int i = 0; i < 12; ++i)
         {
@@ -536,7 +540,7 @@ void TunerBPMPluginAudioProcessor::runKeyCorrelation()
         for (int i = 0; i < 12; ++i)
         {
             int chromaIndex = (tonic + i) % 12;
-            float x = accumulatedChroma[chromaIndex] - chromaMean;
+            float x = chroma[chromaIndex] - chromaMean;
 
             float yb = profB[i] - meanB;
             numB  += x * yb;
@@ -558,9 +562,7 @@ void TunerBPMPluginAudioProcessor::runKeyCorrelation()
         float rE = (denXE * denYE > 1e-9f) ? (numE / std::sqrt(denXE * denYE)) : -1.0f;
         float rT = (denXT * denYT > 1e-9f) ? (numT / std::sqrt(denXT * denYT)) : -1.0f;
 
-        // Multi-profile ensemble weighted consensus (Tunebat blend)
         float r = 0.50f * rB + 0.30f * rE + 0.20f * rT;
-
         if (r > bestCorr)
         {
             bestCorr = r;
@@ -568,11 +570,24 @@ void TunerBPMPluginAudioProcessor::runKeyCorrelation()
         }
     }
 
+    if (outBestCorr != nullptr)
+        *outBestCorr = bestCorr;
+
+    return bestKey;
+}
+
+void TunerBPMPluginAudioProcessor::runKeyCorrelation()
+{
+    if (audioAnalyzedSeconds < 1.0)
+        return;
+
+    float bestCorr = -2.0f;
+    int bestKey = correlateKeyProfile(accumulatedChroma, &bestCorr);
+
     if (bestKey >= 0)
     {
         detectedKeyIndex.store(bestKey);
 
-        // Lock definitively when analyzed time reaches ~6s or high correlation after 3.5s
         if (audioAnalyzedSeconds >= 7.0 || (bestCorr >= 0.70f && audioAnalyzedSeconds >= 3.5))
         {
             scaleIsLocked.store(true);
@@ -743,7 +758,8 @@ void TunerBPMPluginAudioProcessor::processKickBpm(const float* inputData, int nu
 static bool computeTunebatTempo(const std::vector<float>& novelty,
                                 const std::vector<double>& onsetTimes,
                                 float& outFineBpm,
-                                float& outConfidence)
+                                float& outConfidence,
+                                std::function<bool()> shouldCancel = nullptr)
 {
     const int totalFrames = static_cast<int>(novelty.size());
     const int minLag = 14;  // 428.5 BPM (permits half-tempo check for up to 214 BPM)
@@ -770,6 +786,9 @@ static bool computeTunebatTempo(const std::vector<float>& novelty,
     std::vector<float> normR(maxLag + 1, 0.0f);
     for (int tau = minLag; tau <= maxLag; ++tau)
     {
+        if ((tau % 16 == 0) && shouldCancel && shouldCancel())
+            return false;
+
         double sumCross = 0.0, sumSq1 = 0.0, sumSq2 = 0.0;
         for (int n = 0; n < N; ++n)
         {
@@ -1049,12 +1068,21 @@ juce::String TunerBPMPluginAudioProcessor::getBpmStatus() const
 
 void TunerBPMPluginAudioProcessor::clearLoadedAudioFile()
 {
+    ++currentJobId;
+    fileAnalysisActive.store(false);
+    isAudioFileLoaded.store(false, std::memory_order_release);
+
+    if (fileAnalysisThread && fileAnalysisThread->joinable())
+    {
+        fileAnalysisThread->join();
+    }
+
     {
         std::lock_guard<std::mutex> lock(fileMutex);
         loadedAudioFileName = "";
-    }
-    resetScale();
-    unlockBpm();
+ }
+ resetScale();
+ unlockBpm();
 }
 
 // ==============================================================================
@@ -1062,155 +1090,280 @@ void TunerBPMPluginAudioProcessor::clearLoadedAudioFile()
 // ==============================================================================
 void TunerBPMPluginAudioProcessor::loadAndAnalyzeAudioFile(const juce::File& file)
 {
-    if (fileAnalysisThread && fileAnalysisThread->joinable())
-    {
-        fileAnalysisActive.store(false);
-        fileAnalysisThread->join();
-    }
+ // Fast-cancel any existing offline analysis job
+ uint32_t myJobId = ++currentJobId;
+ fileAnalysisActive.store(false);
 
-    {
-        std::lock_guard<std::mutex> lock(fileMutex);
-        loadedAudioFileName = file.getFileName();
-    }
+ if (fileAnalysisThread && fileAnalysisThread->joinable())
+ {
+ fileAnalysisThread->join();
+ }
 
-    fileAnalysisActive.store(true);
-    {
-        std::lock_guard<std::mutex> lock(bpmMutex);
-        bpmStatusText = "ANALYZING FILE: " + file.getFileNameWithoutExtension().toUpperCase();
-    }
+ {
+ std::lock_guard<std::mutex> lock(fileMutex);
+ loadedAudioFileName = file.getFileName();
+ }
+ isAudioFileLoaded.store(true, std::memory_order_release);
 
-    fileAnalysisThread = std::make_unique<std::thread>([this, file]()
-    {
-        std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
-        if (reader == nullptr)
-        {
-            std::lock_guard<std::mutex> lock(bpmMutex);
-            bpmStatusText = "ERROR READING FILE";
-            fileAnalysisActive.store(false);
-            return;
-        }
+ fileAnalysisActive.store(true);
+ {
+ std::lock_guard<std::mutex> lock(bpmMutex);
+ bpmStatusText = "ANALYZING FILE: " + file.getFileNameWithoutExtension().toUpperCase();
+ }
 
-        // Reset accumulators
-        resetScale();
-        unlockBpm();
+ fileAnalysisThread = std::make_unique<std::thread>([this, file, myJobId]()
+ {
+ if (myJobId != currentJobId.load() || !fileAnalysisActive.load())
+ return;
 
-        double fileSampleRate = reader->sampleRate;
-        int64_t totalSamples = reader->lengthInSamples;
+ std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
+ if (reader == nullptr)
+ {
+ if (myJobId == currentJobId.load())
+ {
+ std::lock_guard<std::mutex> lock(bpmMutex);
+ bpmStatusText = "ERROR READING FILE";
+ fileAnalysisActive.store(false);
+ }
+ return;
+ }
 
-        // Skip the first 8 seconds (intros often lack full harmony or drums) and analyze up to 75 seconds
-        int64_t startSample = static_cast<int64_t>(std::min(8.0 * fileSampleRate, totalSamples * 0.1));
-        int64_t durationSamples = static_cast<int64_t>(std::min(75.0 * fileSampleRate, static_cast<double>(totalSamples - startSample)));
-        if (durationSamples <= 0)
-        {
-            startSample = 0;
-            durationSamples = totalSamples;
-        }
+ // Reset display state for this fresh file analysis
+ resetScale();
+ unlockBpm();
 
-        // Setup filter instances for offline analysis
-        BiquadFilter offLow, offMid, offHigh;
-        offLow.makeLowPass(fileSampleRate, 200.0, 0.7071);
-        offMid.makeBandPass(fileSampleRate, 1200.0, 1.0);
-        offHigh.makeHighPass(fileSampleRate, 2800.0, 0.7071);
+ double fileSampleRate = reader->sampleRate;
+ if (fileSampleRate <= 1000.0) fileSampleRate = 44100.0;
+ int64_t totalSamples = reader->lengthInSamples;
 
-        const int frameInterval = std::max(1, static_cast<int>(fileSampleRate / 100.0));
-        const int blockSize = 4096;
-        juce::AudioBuffer<float> tempBuffer(1, blockSize);
+ // Skip the first 8 seconds (intros often lack full harmony or drums) and analyze up to 75 seconds
+ int64_t startSample = static_cast<int64_t>(std::min(8.0 * fileSampleRate, totalSamples * 0.1));
+ int64_t durationSamples = static_cast<int64_t>(std::min(75.0 * fileSampleRate, static_cast<double>(totalSamples - startSample)));
+ if (durationSamples <= 0)
+ {
+ startSample = 0;
+ durationSamples = totalSamples;
+ }
 
-        std::vector<float> fileNovelty;
-        fileNovelty.reserve(8000);
+ if (durationSamples <= 0)
+ {
+ if (myJobId == currentJobId.load())
+ {
+ std::lock_guard<std::mutex> lock(bpmMutex);
+ bpmStatusText = "FILE EMPTY OR UNSUPPORTED";
+ fileAnalysisActive.store(false);
+ }
+ return;
+ }
 
-        std::vector<double> fileOnsets;
-        fileOnsets.reserve(1000);
+ // --- ISOLATED THREAD-LOCAL DSP STATE (ZERO MUTATION OF REAL-TIME AUDIO BUFFERS) ---
+ BiquadFilter offLow, offMid, offHigh;
+ offLow.makeLowPass(fileSampleRate, 200.0, 0.7071);
+ offMid.makeBandPass(fileSampleRate, 1200.0, 1.0);
+ offHigh.makeHighPass(fileSampleRate, 2800.0, 0.7071);
 
-        float fPrevLow = 0.0f, fPrevMid = 0.0f, fPrevHigh = 0.0f;
-        float fNovThresh = 0.0f;
-        float fLowSum = 0.0f, fMidSum = 0.0f, fHighSum = 0.0f;
-        int fCounter = 0;
-        double fTimeSec = 0.0;
-        double fLastOnset = -1.0;
+ const int localFftOrder = 11; // 2048 samples
+ const int localFftSize = 1 << localFftOrder;
+ const int localHopSize = 1024;
+ juce::dsp::FFT localFft(localFftOrder);
+ juce::dsp::WindowingFunction<float> localWindow(localFftSize, juce::dsp::WindowingFunction<float>::hann);
 
-        int64_t samplesReadTotal = 0;
-        while (samplesReadTotal < durationSamples && fileAnalysisActive.load())
-        {
-            int samplesThisBlock = static_cast<int>(std::min(static_cast<int64_t>(blockSize), durationSamples - samplesReadTotal));
-            reader->read(&tempBuffer, 0, samplesThisBlock, startSample + samplesReadTotal, true, false);
+ std::vector<float> localFftFifo(localFftSize, 0.0f);
+ std::vector<float> localFftBuffer(localFftSize * 2, 0.0f);
+ int localFftFifoIndex = 0;
+ std::array<float, 12> localAccumulatedChroma { 0.0f };
 
-            const float* blockData = tempBuffer.getReadPointer(0);
+ const int frameInterval = std::max(1, static_cast<int>(fileSampleRate / 100.0));
+ const int blockSize = 4096;
+ juce::AudioBuffer<float> tempBuffer(1, blockSize);
 
-            // 1. Feed HPCP for key detection
-            processFftHpcp(blockData, samplesThisBlock);
+ std::vector<float> fileNovelty;
+ fileNovelty.reserve(8000);
 
-            // 2. Feed Multi-band Novelty Flux for BPM across the whole 60-75s
-            for (int i = 0; i < samplesThisBlock; ++i)
-            {
-                float s = blockData[i];
-                fTimeSec += 1.0 / fileSampleRate;
+ std::vector<double> fileOnsets;
+ fileOnsets.reserve(1000);
 
-                float yL = offLow.process(s);
-                float yM = offMid.process(s);
-                float yH = offHigh.process(s);
+ float fPrevLow = 0.0f, fPrevMid = 0.0f, fPrevHigh = 0.0f;
+ float fNovThresh = 0.0f;
+ float fLowSum = 0.0f, fMidSum = 0.0f, fHighSum = 0.0f;
+ int fCounter = 0;
+ double fTimeSec = 0.0;
+ double fLastOnset = -1.0;
 
-                fLowSum  += yL * yL;
-                fMidSum  += yM * yM;
-                fHighSum += yH * yH;
-                fCounter++;
+ int64_t samplesReadTotal = 0;
+ while (samplesReadTotal < durationSamples)
+ {
+ if (myJobId != currentJobId.load() || !fileAnalysisActive.load())
+ return;
 
-                if (fCounter >= frameInterval)
-                {
-                    float eL = fLowSum  / static_cast<float>(fCounter);
-                    float eM = fMidSum  / static_cast<float>(fCounter);
-                    float eH = fHighSum / static_cast<float>(fCounter);
-                    fLowSum = fMidSum = fHighSum = 0.0f;
-                    fCounter = 0;
+ int samplesThisBlock = static_cast<int>(std::min(static_cast<int64_t>(blockSize), durationSamples - samplesReadTotal));
+ reader->read(&tempBuffer, 0, samplesThisBlock, startSample + samplesReadTotal, true, false);
 
-                    float lLow  = std::log(1.0f + 1000.0f * eL);
-                    float lMid  = std::log(1.0f + 1000.0f * eM);
-                    float lHigh = std::log(1.0f + 1000.0f * eH);
+ const float* blockData = tempBuffer.getReadPointer(0);
 
-                    float dL = std::max(0.0f, lLow  - fPrevLow);
-                    float dM = std::max(0.0f, lMid  - fPrevMid);
-                    float dH = std::max(0.0f, lHigh - fPrevHigh);
-                    fPrevLow = lLow; fPrevMid = lMid; fPrevHigh = lHigh;
+ // 1. Thread-local HPCP Chromagram Accumulation
+ for (int i = 0; i < samplesThisBlock; ++i)
+ {
+ localFftFifo[localFftFifoIndex++] = blockData[i];
+ if (localFftFifoIndex >= localFftSize)
+ {
+ std::copy(localFftFifo.begin(), localFftFifo.end(), localFftBuffer.begin());
+ std::fill(localFftBuffer.begin() + localFftSize, localFftBuffer.begin() + localFftSize * 2, 0.0f);
+ localWindow.multiplyWithWindowingTable(localFftBuffer.data(), localFftSize);
+ localFft.performFrequencyOnlyForwardTransform(localFftBuffer.data());
 
-                    float flux = 1.0f * dL + 0.65f * dM + 0.35f * dH;
-                    fNovThresh = 0.92f * fNovThresh + 0.08f * flux;
-                    float novelty = std::max(0.0f, flux - 0.35f * fNovThresh);
+ float frameEnergy = 0.0f;
+ for (int k = 1; k < localFftSize / 2; ++k)
+ frameEnergy += localFftBuffer[k];
 
-                    fileNovelty.push_back(novelty);
+ if (frameEnergy >= 1e-4f)
+ {
+ int minBin = std::max(1, juce::roundToInt(50.0 * localFftSize / fileSampleRate));
+ int maxBin = std::min(localFftSize / 2 - 2, juce::roundToInt(3500.0 * localFftSize / fileSampleRate));
+ std::array<float, 12> frameChroma { 0.0f };
 
-                    if (novelty > (fNovThresh * 1.35f + 1e-4f) && (fTimeSec - fLastOnset) > 0.16)
-                    {
-                        fLastOnset = fTimeSec;
-                        fileOnsets.push_back(fTimeSec);
-                    }
-                }
-            }
+ for (int k = minBin; k <= maxBin; ++k)
+ {
+ float mag = localFftBuffer[k];
+ if (mag > localFftBuffer[k - 1] && mag > localFftBuffer[k + 1] && mag > 0.001f)
+ {
+ float y1 = localFftBuffer[k - 1];
+ float y2 = mag;
+ float y3 = localFftBuffer[k + 1];
+ float denom = y1 - 2.0f * y2 + y3;
+ float delta = 0.0f;
+ if (std::abs(denom) > 1e-9f)
+ delta = 0.5f * (y1 - y3) / denom;
+ float exactBin = static_cast<float>(k) + delta;
+ float peakFreq = exactBin * static_cast<float>(fileSampleRate) / static_cast<float>(localFftSize);
+ float peakMag = y2 - 0.25f * (y1 - y3) * delta;
 
-            samplesReadTotal += samplesThisBlock;
-        }
+ if (peakFreq >= 50.0f && peakFreq <= 3500.0f && peakMag > 0.0f)
+ {
+ double midiNote = 12.0 * std::log2(peakFreq / 440.0) + 69.0;
+ double pitchClass = std::fmod(midiNote, 12.0);
+ if (pitchClass < 0.0) pitchClass += 12.0;
 
-        // 3. Finalize Key Detection
-        runKeyCorrelation();
-        scaleIsLocked.store(true);
-        scaleProgress.store(1.0f);
+ const float harmonicWeights[4] = { 1.0f, 0.60f, 0.36f, 0.216f };
+ for (int h = 1; h <= 4; ++h)
+ {
+ double hpc = std::fmod(pitchClass + 12.0 * std::log2(static_cast<double>(h)), 12.0);
+ if (hpc < 0.0) hpc += 12.0;
+ int pcInt = static_cast<int>(std::floor(hpc)) % 12;
+ int pcNext = (pcInt + 1) % 12;
+ float frac = static_cast<float>(hpc - std::floor(hpc));
+ float w = peakMag * harmonicWeights[h - 1];
+ frameChroma[pcInt] += w * (1.0f - frac);
+ frameChroma[pcNext] += w * frac;
+ }
+ }
+ }
+ }
 
-        // 4. Finalize BPM from the complete 60-75 second Novelty vector using Essentia/Tunebat Engine
-        float finalFineBpm = 0.0f;
-        float conf = 0.0f;
-        if (computeTunebatTempo(fileNovelty, fileOnsets, finalFineBpm, conf))
-        {
-            detectedAudioBpm.store(finalFineBpm);
-            bpmIsLocked.store(true);
+ float frameMax = 0.0f;
+ for (int pc = 0; pc < 12; ++pc) frameMax = std::max(frameMax, frameChroma[pc]);
+ if (frameMax > 1e-6f)
+ {
+ for (int pc = 0; pc < 12; ++pc)
+ localAccumulatedChroma[pc] += frameChroma[pc] / frameMax;
+ }
+ }
 
-            {
-                std::lock_guard<std::mutex> lock(bpmMutex);
-                int displayBpm = juce::roundToInt(finalFineBpm);
-                bpmStatusText = "TEMPO LOCKED: " + juce::String(displayBpm) + " BPM";
-            }
-        }
+ std::copy(localFftFifo.begin() + localHopSize, localFftFifo.end(), localFftFifo.begin());
+ localFftFifoIndex = localFftSize - localHopSize;
+ }
+ }
 
-        fileAnalysisActive.store(false);
-    });
+ // 2. Feed Multi-band Novelty Flux for BPM across the whole audio block
+ for (int i = 0; i < samplesThisBlock; ++i)
+ {
+ float s = blockData[i];
+ fTimeSec += 1.0 / fileSampleRate;
+
+ float yL = offLow.process(s);
+ float yM = offMid.process(s);
+ float yH = offHigh.process(s);
+
+ fLowSum += yL * yL;
+ fMidSum += yM * yM;
+ fHighSum += yH * yH;
+ fCounter++;
+
+ if (fCounter >= frameInterval)
+ {
+ float eL = fLowSum / static_cast<float>(fCounter);
+ float eM = fMidSum / static_cast<float>(fCounter);
+ float eH = fHighSum / static_cast<float>(fCounter);
+ fLowSum = fMidSum = fHighSum = 0.0f;
+ fCounter = 0;
+
+ float lLow = std::log(1.0f + 1000.0f * eL);
+ float lMid = std::log(1.0f + 1000.0f * eM);
+ float lHigh = std::log(1.0f + 1000.0f * eH);
+
+ float dL = std::max(0.0f, lLow - fPrevLow);
+ float dM = std::max(0.0f, lMid - fPrevMid);
+ float dH = std::max(0.0f, lHigh - fPrevHigh);
+ fPrevLow = lLow; fPrevMid = lMid; fPrevHigh = lHigh;
+
+ float flux = 1.0f * dL + 0.65f * dM + 0.35f * dH;
+ fNovThresh = 0.92f * fNovThresh + 0.08f * flux;
+ float novelty = std::max(0.0f, flux - 0.35f * fNovThresh);
+
+ fileNovelty.push_back(novelty);
+
+ if (novelty > (fNovThresh * 1.35f + 1e-4f) && (fTimeSec - fLastOnset) > 0.16)
+ {
+ fLastOnset = fTimeSec;
+ fileOnsets.push_back(fTimeSec);
+ }
+ }
+ }
+
+ samplesReadTotal += samplesThisBlock;
+ scaleProgress.store(juce::jlimit(0.0f, 1.0f, static_cast<float>(samplesReadTotal) / static_cast<float>(durationSamples)));
+ }
+
+ if (myJobId != currentJobId.load() || !fileAnalysisActive.load())
+ return;
+
+ // 3. Finalize Key Detection using local accumulated chroma
+ int bestKey = correlateKeyProfile(localAccumulatedChroma);
+ if (bestKey >= 0)
+ {
+ detectedKeyIndex.store(bestKey);
+ scaleIsLocked.store(true);
+ scaleProgress.store(1.0f);
+ }
+
+ // 4. Finalize BPM from Novelty vector using Essentia/Tunebat Engine with cancel check
+ float finalFineBpm = 0.0f;
+ float conf = 0.0f;
+ auto cancelCheck = [&]() { return myJobId != currentJobId.load() || !fileAnalysisActive.load(); };
+ if (computeTunebatTempo(fileNovelty, fileOnsets, finalFineBpm, conf, cancelCheck))
+ {
+ if (myJobId == currentJobId.load() && fileAnalysisActive.load())
+ {
+ detectedAudioBpm.store(finalFineBpm);
+ bpmIsLocked.store(true);
+
+ std::lock_guard<std::mutex> lock(bpmMutex);
+ int displayBpm = juce::roundToInt(finalFineBpm);
+ bpmStatusText = "TEMPO LOCKED: " + juce::String(displayBpm) + " BPM";
+ }
+ }
+ else
+ {
+ if (myJobId == currentJobId.load() && fileAnalysisActive.load())
+ {
+ std::lock_guard<std::mutex> lock(bpmMutex);
+ bpmStatusText = "ANALYSIS COMPLETE";
+ }
+ }
+
+ if (myJobId == currentJobId.load())
+ fileAnalysisActive.store(false);
+ });
 }
 
 //==============================================================================

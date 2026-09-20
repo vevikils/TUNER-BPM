@@ -166,12 +166,236 @@ int main()
     testBpm("TEST 5: 140 BPM (Dubstep / Techno)", 140.0);
     testBpm("TEST 6: 90 BPM (Hip-Hop / Urban)", 90.0);
     testGrooveBpm("TEST 7: 120 BPM Full Groove (Kick+Snare+HiHats)", 120.0);
-    testGrooveBpm("TEST 8: 174 BPM DnB Groove (Kick+Snare+HiHats)", 174.0);
+        testGrooveBpm("TEST 8: 174 BPM DnB Groove (Kick+Snare+HiHats)", 174.0);
+
+    // ==============================================================================
+    // MULTI-FILE LOADING & FL STUDIO CONCURRENCY TEST SUITE
+    // ==============================================================================
+    auto generateTestWav = [&](const juce::File& file, double durationSec, double targetBpm, double fRoot)
+    {
+        if (file.existsAsFile())
+            file.deleteFile();
+
+        juce::WavAudioFormat wavFormat;
+        std::unique_ptr<juce::AudioFormatWriter> writer(
+            wavFormat.createWriterFor(new juce::FileOutputStream(file), 44100.0, 1, 16, {}, 0));
+
+        if (writer == nullptr)
+            return false;
+
+        const int totalSamples = static_cast<int>(durationSec * 44100.0);
+        const int writeBlock = 2048;
+        juce::AudioBuffer<float> tempBuf(1, writeBlock);
+
+        double secondsPerBeat = 60.0 / targetBpm;
+        double samplesPerBeat = secondsPerBeat * 44100.0;
+        double sampleIndex = 0.0;
+
+        double p1 = 0.0, p2 = 0.0, p3 = 0.0;
+        double fThird = fRoot * 1.25992;
+        double fFifth = fRoot * 1.49831;
+
+        int samplesWritten = 0;
+        while (samplesWritten < totalSamples)
+        {
+            int toWrite = std::min(writeBlock, totalSamples - samplesWritten);
+            float* writePtr = tempBuf.getWritePointer(0);
+
+            for (int i = 0; i < toWrite; ++i)
+            {
+                float s = 0.25f * static_cast<float>(std::sin(p1) + std::sin(p2) + std::sin(p3));
+                p1 += 2.0 * juce::double_Pi * fRoot / 44100.0;
+                p2 += 2.0 * juce::double_Pi * fThird / 44100.0;
+                p3 += 2.0 * juce::double_Pi * fFifth / 44100.0;
+
+                double posInBeat = std::fmod(sampleIndex, samplesPerBeat);
+                if (posInBeat < 0.04 * 44100.0)
+                {
+                    double t = posInBeat / 44100.0;
+                    double kFreq = 130.0 * std::exp(-t * 35.0) + 50.0;
+                    s += static_cast<float>(0.75 * std::sin(2.0 * juce::double_Pi * kFreq * t) * (1.0 - t / 0.04));
+                }
+
+                writePtr[i] = juce::jlimit(-1.0f, 1.0f, s);
+                sampleIndex += 1.0;
+            }
+
+            writer->writeFromAudioSampleBuffer(tempBuf, 0, toWrite);
+            samplesWritten += toWrite;
+        }
+
+        return true;
+    };
+
+    juce::File tempDir = juce::File::getSpecialLocation(juce::File::tempDirectory);
+    juce::File file1 = tempDir.getChildFile("tuner_bpm_test_1.wav");
+    juce::File file2 = tempDir.getChildFile("tuner_bpm_test_2.wav");
+    juce::File file3 = tempDir.getChildFile("tuner_bpm_test_3.wav");
+
+    generateTestWav(file1, 15.0, 128.0, 261.63); // C Major, 128 BPM
+    generateTestWav(file2, 15.0, 140.0, 293.66); // D Minor, 140 BPM
+    generateTestWav(file3, 15.0, 90.0, 440.0);   // A Major, 90 BPM
+
+    // TEST 9: Sequential Multi-File Loading (File 1 -> File 2)
+    std::cout << "\n[TEST 9: Multi-File Sequential Loading (File 1 -> File 2)]" << std::endl;
+    processor.loadAndAnalyzeAudioFile(file1);
+    int waitCounter = 0;
+    while (processor.isAnalyzingFile() && waitCounter < 200)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        waitCounter++;
+    }
+    bool f1Loaded = processor.hasLoadedAudioFile();
+    float bpm1 = processor.getDetectedAudioBpm();
+    std::cout << "File 1 analyzed. hasLoadedAudioFile: " << (f1Loaded ? "YES" : "NO")
+              << ", BPM: " << bpm1 << ", Scale: " << processor.getDetectedScaleName() << std::endl;
+
+    std::cout << "Loading SECOND File (140 BPM, D) - Testing Seamless Replacement..." << std::endl;
+    processor.loadAndAnalyzeAudioFile(file2);
+    waitCounter = 0;
+    while (processor.isAnalyzingFile() && waitCounter < 200)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        waitCounter++;
+    }
+    bool f2Loaded = processor.hasLoadedAudioFile();
+    float bpm2 = processor.getDetectedAudioBpm();
+    std::cout << "File 2 analyzed. hasLoadedAudioFile: " << (f2Loaded ? "YES" : "NO")
+              << ", BPM: " << bpm2 << ", Scale: " << processor.getDetectedScaleName() << std::endl;
+
+    bool passed9 = f1Loaded && f2Loaded && (std::abs(bpm2 - 140.0f) <= 2.0f);
+    std::cout << "Result: " << (passed9 ? "PASS" : "FAIL") << std::endl;
+    if (!passed9) allPassed = false;
+
+    // TEST 10: Rapid Consecutive Multi-File Loading (Mid-Flight Cancellation)
+    std::cout << "\n[TEST 10: Rapid Multi-File Cancellation (File 1 -> File 2 -> File 3 Rapid Load)]" << std::endl;
+    processor.loadAndAnalyzeAudioFile(file1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    processor.loadAndAnalyzeAudioFile(file2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    processor.loadAndAnalyzeAudioFile(file3);
+
+    waitCounter = 0;
+    while (processor.isAnalyzingFile() && waitCounter < 200)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        waitCounter++;
+    }
+
+    float bpm3 = processor.getDetectedAudioBpm();
+    std::cout << "Final File 3 BPM: " << bpm3 << " (Expected: 90.0)" << std::endl;
+    bool passed10 = processor.hasLoadedAudioFile() && (std::abs(bpm3 - 90.0f) <= 2.0f);
+    std::cout << "Result: " << (passed10 ? "PASS" : "FAIL") << std::endl;
+    if (!passed10) allPassed = false;
+
+    // TEST 11: Real-Time Audio Callback Concurrency (FL Studio Engine Simulation)
+    std::cout << "\n[TEST 11: Concurrent Real-Time Audio Callback (FL Studio Engine Simulation)]" << std::endl;
+    std::atomic<bool> audioThreadActive { true };
+    std::atomic<uint64_t> audioBlocksProcessed { 0 };
+
+    std::thread audioSimThread([&]()
+    {
+        juce::AudioBuffer<float> simBuf(2, blockSize);
+        juce::MidiBuffer simMidi;
+        double phase = 0.0;
+
+        while (audioThreadActive.load(std::memory_order_relaxed))
+        {
+            simBuf.clear();
+            float* left = simBuf.getWritePointer(0);
+            float* right = simBuf.getWritePointer(1);
+            for (int i = 0; i < blockSize; ++i)
+            {
+                float s = static_cast<float>(0.1 * std::sin(phase));
+                phase += 2.0 * juce::double_Pi * 440.0 / sampleRate;
+                left[i] = s;
+                right[i] = s;
+            }
+
+            processor.processBlock(simBuf, simMidi);
+            audioBlocksProcessed.fetch_add(1, std::memory_order_relaxed);
+            std::this_thread::sleep_for(std::chrono::milliseconds(4));
+        }
+    });
+
+    std::cout << "DAW audio callback running concurrently. Loading File 1..." << std::endl;
+    processor.loadAndAnalyzeAudioFile(file1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    std::cout << "Loading File 2 while audio callback running..." << std::endl;
+    processor.loadAndAnalyzeAudioFile(file2);
+    waitCounter = 0;
+    while (processor.isAnalyzingFile() && waitCounter < 200)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        waitCounter++;
+    }
+
+    std::cout << "Testing Eject / Clear while audio callback running..." << std::endl;
+    processor.clearLoadedAudioFile();
+    std::cout << "hasLoadedAudioFile after eject: " << (processor.hasLoadedAudioFile() ? "YES" : "NO") << std::endl;
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    std::cout << "Reloading File 3 while audio callback running..." << std::endl;
+    processor.loadAndAnalyzeAudioFile(file3);
+    waitCounter = 0;
+    while (processor.isAnalyzingFile() && waitCounter < 200)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        waitCounter++;
+    }
+
+    audioThreadActive.store(false);
+    if (audioSimThread.joinable())
+        audioSimThread.join();
+
+    std::cout << "Audio blocks processed concurrently: " << audioBlocksProcessed.load() << std::endl;
+    bool passed11 = (audioBlocksProcessed.load() > 50) && processor.hasLoadedAudioFile();
+    std::cout << "Result: " << (passed11 ? "PASS" : "FAIL") << std::endl;
+    if (!passed11) allPassed = false;
+
+    // TEST 12: Corrupt & Unsupported File Resilience
+    std::cout << "\n[TEST 12: Corrupt, 0-Byte & Unsupported Audio File Resilience]" << std::endl;
+    juce::File emptyFile = tempDir.getChildFile("tuner_empty.wav");
+    emptyFile.deleteFile();
+    emptyFile.create();
+
+    juce::File corruptFile = tempDir.getChildFile("tuner_corrupt.wav");
+    corruptFile.deleteFile();
+    corruptFile.appendData("RIFF....WAVEfmt ....not real wav audio data", 43);
+
+    std::cout << "Loading 0-byte file (Must not crash)..." << std::endl;
+    processor.loadAndAnalyzeAudioFile(emptyFile);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    std::cout << "Loading corrupt file (Must not crash)..." << std::endl;
+    processor.loadAndAnalyzeAudioFile(corruptFile);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    std::cout << "Recovery test: Loading valid file immediately after corrupt files..." << std::endl;
+    processor.loadAndAnalyzeAudioFile(file1);
+    waitCounter = 0;
+    while (processor.isAnalyzingFile() && waitCounter < 200)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        waitCounter++;
+    }
+
+    std::cout << "Recovered BPM: " << processor.getDetectedAudioBpm() << std::endl;
+    bool passed12 = processor.hasLoadedAudioFile() && (std::abs(processor.getDetectedAudioBpm() - 128.0f) <= 2.0f);
+    std::cout << "Result: " << (passed12 ? "PASS" : "FAIL") << std::endl;
+    if (!passed12) allPassed = false;
+
+    file1.deleteFile();
+    file2.deleteFile();
+    file3.deleteFile();
+    emptyFile.deleteFile();
+    corruptFile.deleteFile();
 
     std::cout << "\n========================================" << std::endl;
     if (allPassed)
     {
-        std::cout << "OVERALL: ALL 8 TESTS PASSED WITH 100% ACCURACY!" << std::endl;
+        std::cout << "OVERALL: ALL 12 TESTS (INCLUDING MULTI-FILE CONCURRENCY) PASSED WITH 100% ACCURACY!" << std::endl;
         return 0;
     }
     else

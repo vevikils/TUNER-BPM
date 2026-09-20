@@ -144,8 +144,7 @@ public:
     }
     bool hasLoadedAudioFile() const
     {
-        std::lock_guard<std::mutex> lock(fileMutex);
-        return loadedAudioFileName.isNotEmpty();
+        return isAudioFileLoaded.load(std::memory_order_acquire);
     }
     void clearLoadedAudioFile();
 
@@ -249,6 +248,8 @@ private:
     // Offline audio file analyzer (Tunebat web style)
     juce::AudioFormatManager formatManager;
     std::atomic<bool> fileAnalysisActive { false };
+    std::atomic<bool> isAudioFileLoaded { false };
+    std::atomic<uint32_t> currentJobId { 0 };
     std::unique_ptr<std::thread> fileAnalysisThread;
     mutable std::mutex fileMutex;
     juce::String loadedAudioFileName;

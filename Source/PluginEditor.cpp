@@ -215,11 +215,19 @@ void TunerBPMPluginAudioProcessorEditor::filesDropped(const juce::StringArray& f
 {
     juce::ignoreUnused(x, y);
     isFileHovering = false;
-    if (files.size() > 0)
+    for (const auto& filePath : files)
     {
-        juce::File audioFile(files[0]);
+        juce::File audioFile(filePath);
         if (audioFile.existsAsFile())
-            audioProcessor.loadAndAnalyzeAudioFile(audioFile);
+        {
+            auto ext = audioFile.getFileExtension().toLowerCase();
+            if (ext == ".wav" || ext == ".mp3" || ext == ".flac" ||
+                ext == ".aif" || ext == ".aiff" || ext == ".ogg" || ext == ".m4a")
+            {
+                audioProcessor.loadAndAnalyzeAudioFile(audioFile);
+                break;
+            }
+        }
     }
     repaint();
 }
