@@ -286,7 +286,7 @@ void TunerBPMPluginAudioProcessorEditor::paint(juce::Graphics& g)
     // Version Pill Badge: V.2
     float v2X = hX + 195.0f;
     float v2Y = (headerH - 22.0f) * 0.5f;
-    juce::Rectangle<float> v2Badge(v2X, v2Y, 44.0f, 22.0f);
+    juce::Rectangle<float> v2Badge(v2X, v2Y, 52.0f, 22.0f);
     g.setColour(StudioStyle::accentCyan.withAlpha(0.15f));
     g.fillRoundedRectangle(v2Badge, 6.0f);
     g.setColour(StudioStyle::accentCyan.withAlpha(0.60f));
@@ -294,10 +294,10 @@ void TunerBPMPluginAudioProcessorEditor::paint(juce::Graphics& g)
 
     g.setColour(StudioStyle::accentCyan);
     g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
-    g.drawText("V.2", v2Badge, juce::Justification::centred);
+    g.drawText("V.2.1", v2Badge, juce::Justification::centred);
 
     // Vertical Hairline Divider
-    float divX = v2X + 54.0f;
+    float divX = v2X + 62.0f;
     g.setColour(StudioStyle::cardBorder);
     g.drawVerticalLine(static_cast<int>(divX), 13.0f, headerH - 13.0f);
 
@@ -626,7 +626,7 @@ void TunerBPMPluginAudioProcessorEditor::paint(juce::Graphics& g)
     // Micro Watermark
     g.setColour(StudioStyle::textMuted.withAlpha(0.40f));
     g.setFont(juce::FontOptions(8.5f, juce::Font::bold));
-    g.drawText("SUPREME TUNER BPM V.2 • TUNEBAT ENGINE", static_cast<int>(oscX), static_cast<int>(dockY + dockH - 14.0f), static_cast<int>(oscW), 10, juce::Justification::bottomRight);
+    g.drawText("SUPREME TUNER BPM V.2.1.1 • TUNEBAT ENGINE", static_cast<int>(oscX), static_cast<int>(dockY + dockH - 14.0f), static_cast<int>(oscW), 10, juce::Justification::bottomRight);
 
     // ══ DRAG & DROP HOVER OVERLAY (Tunebat Web Glass Dropzone) ════════════════
     if (isFileHovering)

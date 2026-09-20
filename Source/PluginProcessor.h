@@ -250,9 +250,17 @@ private:
     std::atomic<bool> fileAnalysisActive { false };
     std::atomic<bool> isAudioFileLoaded { false };
     std::atomic<uint32_t> currentJobId { 0 };
-    std::unique_ptr<std::thread> fileAnalysisThread;
+    std::atomic<bool> workerShouldExit { false };
+    std::thread workerThread;
+    std::condition_variable workerCv;
+    std::mutex workerMutex;
+    juce::File pendingFile;
+    uint32_t pendingJobId { 0 };
     mutable std::mutex fileMutex;
     juce::String loadedAudioFileName;
+
+    void runAnalysisWorker();
+    void analyzeFileInternal(const juce::File& file, uint32_t myJobId);
 
     //==============================================================================
     // Beat Pulse Internals (Visual pulse for LEDs only, NO AUDIO GENERATION)

@@ -8,7 +8,7 @@ int main()
     juce::ScopedJuceInitialiser_GUI juceInit;
 
     std::cout << "========================================" << std::endl;
-    std::cout << "SUPREME TUNER BPM V.2 - TUNEBAT TEST SUITE" << std::endl;
+    std::cout << "SUPREME TUNER BPM V.2.1 - TUNEBAT TEST SUITE" << std::endl;
     std::cout << "========================================" << std::endl;
 
     TunerBPMPluginAudioProcessor processor;
@@ -386,16 +386,158 @@ int main()
     std::cout << "Result: " << (passed12 ? "PASS" : "FAIL") << std::endl;
     if (!passed12) allPassed = false;
 
+    // ==============================================================================
+    // STEREO (2-CHANNEL) DECODING & EXTENDED STRESS TEST SUITE
+    // ==============================================================================
+    auto generateStereoWav = [&](const juce::File& file, double durationSec, double targetBpm, double fRoot, int bits)
+    {
+        if (file.existsAsFile())
+            file.deleteFile();
+
+        juce::WavAudioFormat wavFormat;
+        std::unique_ptr<juce::AudioFormatWriter> writer(
+            wavFormat.createWriterFor(new juce::FileOutputStream(file), 44100.0, 2, bits, {}, 0));
+
+        if (writer == nullptr)
+            return false;
+
+        const int totalSamples = static_cast<int>(durationSec * 44100.0);
+        const int writeBlock = 2048;
+        juce::AudioBuffer<float> tempBuf(2, writeBlock);
+
+        double secondsPerBeat = 60.0 / targetBpm;
+        double samplesPerBeat = secondsPerBeat * 44100.0;
+        double sampleIndex = 0.0;
+
+        double p1 = 0.0, p2 = 0.0, p3 = 0.0;
+        double fThird = fRoot * 1.25992;
+        double fFifth = fRoot * 1.49831;
+
+        int samplesWritten = 0;
+        while (samplesWritten < totalSamples)
+        {
+            int toWrite = std::min(writeBlock, totalSamples - samplesWritten);
+            float* leftPtr = tempBuf.getWritePointer(0);
+            float* rightPtr = tempBuf.getWritePointer(1);
+
+            for (int i = 0; i < toWrite; ++i)
+            {
+                float sHarm = 0.25f * static_cast<float>(std::sin(p1) + std::sin(p2) + std::sin(p3));
+                p1 += 2.0 * juce::double_Pi * fRoot / 44100.0;
+                p2 += 2.0 * juce::double_Pi * fThird / 44100.0;
+                p3 += 2.0 * juce::double_Pi * fFifth / 44100.0;
+
+                float sKick = 0.0f;
+                double posInBeat = std::fmod(sampleIndex, samplesPerBeat);
+                if (posInBeat < 0.04 * 44100.0)
+                {
+                    double t = posInBeat / 44100.0;
+                    double kFreq = 130.0 * std::exp(-t * 35.0) + 50.0;
+                    sKick = static_cast<float>(0.75 * std::sin(2.0 * juce::double_Pi * kFreq * t) * (1.0 - t / 0.04));
+                }
+
+                // Stereo panning: left slightly accented on harmony, right slightly accented on kick
+                leftPtr[i]  = juce::jlimit(-1.0f, 1.0f, sHarm * 1.1f + sKick * 0.9f);
+                rightPtr[i] = juce::jlimit(-1.0f, 1.0f, sHarm * 0.9f + sKick * 1.1f);
+                sampleIndex += 1.0;
+            }
+
+            writer->writeFromAudioSampleBuffer(tempBuf, 0, toWrite);
+            samplesWritten += toWrite;
+        }
+        return true;
+    };
+
+    // TEST 13: Stereo 16-Bit WAV File Analysis (Direct verification of fix for 0xc0000005 crash)
+    std::cout << "\n[TEST 13: Stereo (2-Channel) 16-Bit WAV Analysis (Fix for FL Studio Crash)]" << std::endl;
+    juce::File stereoFile1 = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("test_stereo_130bpm_d.wav");
+    generateStereoWav(stereoFile1, 12.0, 130.0, 293.66, 16); // D Major / 130 BPM
+    processor.loadAndAnalyzeAudioFile(stereoFile1);
+    waitCounter = 0;
+    while (processor.isAnalyzingFile() && waitCounter < 250)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        waitCounter++;
+    }
+    std::cout << "Stereo File BPM: " << processor.getDetectedAudioBpm() << " (Expected: ~130.0)" << std::endl;
+    std::cout << "Stereo File Scale: " << processor.getDetectedScaleName() << std::endl;
+    bool passed13 = processor.hasLoadedAudioFile() && (std::abs(processor.getDetectedAudioBpm() - 130.0f) <= 2.5f);
+    std::cout << "Result: " << (passed13 ? "PASS" : "FAIL") << std::endl;
+    if (!passed13) allPassed = false;
+
+    // TEST 14: Stereo 24-Bit Studio Mastering WAV File Analysis
+    std::cout << "\n[TEST 14: Stereo 24-Bit Studio Mastering WAV Analysis]" << std::endl;
+    juce::File stereoFile24 = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("test_stereo_124bpm_c_24bit.wav");
+    generateStereoWav(stereoFile24, 20.0, 124.0, 261.63, 24); // C Major / 124 BPM, 24-bit
+    processor.loadAndAnalyzeAudioFile(stereoFile24);
+    waitCounter = 0;
+    while (processor.isAnalyzingFile() && waitCounter < 250)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        waitCounter++;
+    }
+    std::cout << "24-Bit Stereo BPM: " << processor.getDetectedAudioBpm() << " (Expected: ~124.0)" << std::endl;
+    bool passed14 = processor.hasLoadedAudioFile() && (std::abs(processor.getDetectedAudioBpm() - 124.0f) <= 2.5f);
+    std::cout << "Result: " << (passed14 ? "PASS" : "FAIL") << std::endl;
+    if (!passed14) allPassed = false;
+
+    // TEST 15: Rapid Multi-Stereo Sequential File Switching (5 Consecutive Files)
+    std::cout << "\n[TEST 15: Rapid Multi-Stereo Sequential Switching (Files 1 -> 2 -> 3 -> 4 -> 5)]" << std::endl;
+    juce::File stereoFileA = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("test_st_a.wav");
+    juce::File stereoFileB = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("test_st_b.wav");
+    juce::File stereoFileC = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("test_st_c.wav");
+    generateStereoWav(stereoFileA, 6.0, 120.0, 261.63, 16);
+    generateStereoWav(stereoFileB, 6.0, 128.0, 293.66, 16);
+    generateStereoWav(stereoFileC, 6.0, 140.0, 329.63, 16);
+
+    std::cout << "Dropping File 1 (Stereo)..." << std::endl;
+    processor.loadAndAnalyzeAudioFile(stereoFileA);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    std::cout << "Dropping File 2 (Stereo - mid flight)..." << std::endl;
+    processor.loadAndAnalyzeAudioFile(stereoFileB);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    std::cout << "Dropping File 3 (Stereo - exactly where FL Studio crashed)..." << std::endl;
+    processor.loadAndAnalyzeAudioFile(stereoFileC);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    std::cout << "Dropping File 4 (Stereo)..." << std::endl;
+    processor.loadAndAnalyzeAudioFile(stereoFileA);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    std::cout << "Dropping File 5 (Final Target: 128 BPM, Stereo)..." << std::endl;
+    processor.loadAndAnalyzeAudioFile(stereoFileB);
+
+    waitCounter = 0;
+    while (processor.isAnalyzingFile() && waitCounter < 250)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        waitCounter++;
+    }
+
+    std::cout << "Final File 5 BPM: " << processor.getDetectedAudioBpm() << " (Expected: ~128.0)" << std::endl;
+    std::cout << "Final File 5 Scale: " << processor.getDetectedScaleName() << std::endl;
+    bool passed15 = processor.hasLoadedAudioFile() && (std::abs(processor.getDetectedAudioBpm() - 128.0f) <= 2.5f);
+    std::cout << "Result: " << (passed15 ? "PASS" : "FAIL") << std::endl;
+    if (!passed15) allPassed = false;
+
+    // Cleanup test files
     file1.deleteFile();
     file2.deleteFile();
     file3.deleteFile();
     emptyFile.deleteFile();
     corruptFile.deleteFile();
+    stereoFile1.deleteFile();
+    stereoFile24.deleteFile();
+    stereoFileA.deleteFile();
+    stereoFileB.deleteFile();
+    stereoFileC.deleteFile();
 
     std::cout << "\n========================================" << std::endl;
     if (allPassed)
     {
-        std::cout << "OVERALL: ALL 12 TESTS (INCLUDING MULTI-FILE CONCURRENCY) PASSED WITH 100% ACCURACY!" << std::endl;
+        std::cout << "OVERALL: ALL 15 TESTS (INCLUDING STEREO DECODING & MULTI-FILE CONCURRENCY) PASSED WITH 100% ACCURACY!" << std::endl;
         return 0;
     }
     else

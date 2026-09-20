@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.22)
 # Set global configurations before fetching JUCE
 set(JUCE_COPY_PLUGIN_AFTER_BUILD OFF CACHE BOOL "Disable copying plugin to system folders after build")
 
-project(TunerBPMPlugin VERSION 2.0.0 LANGUAGES CXX)
+project(TunerBPMPlugin VERSION 2.1.0 LANGUAGES CXX)
 
 # Require C++17
 set(CMAKE_CXX_STANDARD 17)
@@ -29,11 +29,11 @@ juce_add_plugin(TunerBPMPlugin
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS TRUE
     COPY_AFTER_BUILD OFF
-    PLUGIN_NAME "Supreme Tuner BPM V.2"
-    PRODUCT_NAME "Supreme Tuner BPM V.2"
-    PLUGIN_CODE "Stb2"
+    PLUGIN_NAME "Supreme Tuner BPM V.2.1"
+    PRODUCT_NAME "Supreme Tuner BPM V.2.1"
+    PLUGIN_CODE "Stb3"
     PLUGIN_MANUFACTURER_CODE "Vevi"
-    VERSION "2.0.0"
+    VERSION "2.1.0"
     FORMATS VST3 Standalone
 )
 
@@ -89,6 +89,6 @@ target_link_libraries(DSPTest PRIVATE
 target_compile_definitions(DSPTest PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
-    JucePlugin_Name="SupremeTunerBPMV2"
+    JucePlugin_Name="SupremeTunerBPMV21"
 )
 
