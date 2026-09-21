@@ -1,7 +1,7 @@
 # 🎵 STT2 (SUPREME TEMPO & TUNER — BY VEVI)
 
-[![Download Release](https://img.shields.io/badge/Download-v2.0.0--Windows-blue.svg?style=for-the-badge&logo=github)](https://github.com/Vevikils/TUNER-BPM/releases/latest)
-[![Version](https://img.shields.io/badge/Version-v2.0--PRO-cyan.svg?style=for-the-badge)]()
+[![Download Release](https://img.shields.io/badge/Download-v2.2.0--Windows-blue.svg?style=for-the-badge&logo=github)](https://github.com/Vevikils/TUNER-BPM/releases/latest)
+[![Version](https://img.shields.io/badge/Version-v2.2.0--PRO-cyan.svg?style=for-the-badge)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![JUCE Framework](https://img.shields.io/badge/JUCE-8.0.0-orange.svg)](https://juce.com/)
 [![C++ Standard](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
@@ -23,7 +23,7 @@ Download the pre-compiled Windows binaries directly from the **[Releases Page](h
 
 ---
 
-## ✨ Features (Version 2.0)
+## ✨ Features (Version 2.2.0 PRO)
 
 - 🎼 **Harmonic Key & Scale Detector (Polyphonic IIR Chromagram)**:
   - **36-Band IIR Semitone Filter Bank**: Analyzes octaves 3, 4, and 5 (130 Hz to 1000 Hz) where chords, synths, and vocal melodies reside, bypassing 808 sub-bass mud.

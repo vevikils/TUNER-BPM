@@ -6,14 +6,17 @@
 
 /**
  * @class TunerBPMPluginAudioProcessorEditor
- * @brief Luxury Studio Pro Obsidian Glass GUI Editor for STT2 (v2.0 PRO).
+ * @brief Luxury Studio Pro Obsidian Glass GUI Editor for SUPREME TUNER BPM (v2.2.0 PRO).
  * 
  * Features:
- *  - Ultra-clean high-end two-card layout (Harmonic Key & Scale + Acoustic Tempo BPM).
- *  - Prominent Loaded File display banner with instant Eject / Live DAW sync toggle.
- *  - Drag & Drop Audio File (MP3, WAV, FLAC, AIFF) analysis like Tunebat Analyzer.
- *  - Organic Luminous Dual-Pass Oscilloscope and Chromatic Pitch Cents Gauge.
+ *  - UI-UX Pro Max Design System: OLED True Black (#07080C), Glassmorphism, Specular Highlights.
+ *  - Two Balanced Luxury Cards: Harmonic Key & Scale (Tunebat HPCP) + Acoustic Tempo (BPM).
+ *  - Robust Error Notification Banner with Instant Dismiss / Live DAW sync.
+ *  - Producer Quick Multipliers (1/2x and 2x buttons) for instantaneous half-time/double-time.
+ *  - Drag & Drop Audio File (WAV, MP3, FLAC, AIFF, OGG, M4A) with glowing neon dropzone.
+ *  - Organic Luminous Dual-Pass Oscilloscope & Chromatic Pitch Cents Gauge.
  *  - Discrete 4-Beat LED visual metronome with exponential phosphor flash.
+ *  - Official signature and branding: vevikils.
  */
 class TunerBPMPluginAudioProcessorEditor  : public juce::AudioProcessorEditor,
                                              public juce::FileDragAndDropTarget,
@@ -43,6 +46,8 @@ private:
     juce::TextButton ejectFileButton;
     juce::TextButton resetAllButton;
     juce::TextButton unlockBpmButton;
+    juce::TextButton halfBpmButton;
+    juce::TextButton doubleBpmButton;
 
     std::unique_ptr<juce::FileChooser> fileChooser;
     bool isFileHovering = false;
@@ -52,6 +57,7 @@ private:
     int currentBeatNum = 1;
 
     float smoothedCents = 0.0f;
+    float detectedHz = 0.0f;
     juce::String activeNoteName = "---";
 
     float oscilloscopeData[TunerBPMPluginAudioProcessor::oscilloscopeSize];
@@ -68,6 +74,8 @@ private:
 
     juce::String currentLoadedFileName;
     bool isAnalyzingFile = false;
+    bool hasFileError = false;
+    juce::String fileErrorMessage;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TunerBPMPluginAudioProcessorEditor)
 };

@@ -1,10 +1,10 @@
-$srcFile = "C:\Users\alfaswz\Desktop\TUNER+BPM\build\TunerBPMPlugin_artefacts\Release\VST3\Supreme Tuner BPM V.2.1.vst3\Contents\x86_64-win\Supreme Tuner BPM V.2.1.vst3"
-$srcBundle = "C:\Users\alfaswz\Desktop\TUNER+BPM\build\TunerBPMPlugin_artefacts\Release\VST3\Supreme Tuner BPM V.2.1.vst3"
-$srcExe = "C:\Users\alfaswz\Desktop\TUNER+BPM\build\TunerBPMPlugin_artefacts\Release\Standalone\Supreme Tuner BPM V.2.1.exe"
+﻿$srcFile = "C:\Users\alfaswz\Desktop\TUNER+BPM\build\TunerBPMPlugin_artefacts\Release\VST3\Supreme Tuner BPM V.2.2.vst3\Contents\x86_64-win\Supreme Tuner BPM V.2.2.vst3"
+$srcBundle = "C:\Users\alfaswz\Desktop\TUNER+BPM\build\TunerBPMPlugin_artefacts\Release\VST3\Supreme Tuner BPM V.2.2.vst3"
+$srcExe = "C:\Users\alfaswz\Desktop\TUNER+BPM\build\TunerBPMPlugin_artefacts\Release\Standalone\Supreme Tuner BPM V.2.2.exe"
 
 # Copy entire VST3 bundle to Common Files\VST3
 $commonVst3 = "C:\Program Files\Common Files\VST3"
-$destBundle = Join-Path $commonVst3 "Supreme Tuner BPM V.2.1.vst3"
+$destBundle = Join-Path $commonVst3 "Supreme Tuner BPM V.2.2.vst3"
 
 if (Test-Path $destBundle) {
     try {
@@ -19,9 +19,9 @@ if (Test-Path $destBundle) {
 }
 
 $targets = @(
-    "C:\\Program Files\\Common Files\\VST3\\Supreme Tuner BPM V.2.vst3\\Contents\\x86_64-win\\Supreme Tuner BPM V.2.vst3",
+    "C:\Program Files\Common Files\VST3\Supreme Tuner BPM V.2.2.vst3\Contents\x86_64-win\Supreme Tuner BPM V.2.2.vst3",
     "C:\Program Files\Common Files\VST3\Supreme Tuner BPM V.2.1.vst3\Contents\x86_64-win\Supreme Tuner BPM V.2.1.vst3",
-    "C:\Program Files\Common Files\VST3\Supreme Tuner BPM V.2.1\Supreme Tuner BPM V.2.1.vst3",
+    "C:\Program Files\Common Files\VST3\Supreme Tuner BPM V.2.vst3\Contents\x86_64-win\Supreme Tuner BPM V.2.vst3",
     "C:\Program Files\Common Files\VST3\STB2\STB2.vst3",
     "C:\Program Files\Common Files\VST3\STB2.vst3\Contents\x86_64-win\STB2.vst3",
     "C:\Program Files\Common Files\VST3\SupremeTunerBPM.vst3\Contents\x86_64-win\STB2.vst3",
@@ -53,6 +53,8 @@ foreach ($t in $targets) {
 }
 
 if (!(Test-Path ".\Output")) { New-Item -ItemType Directory -Path ".\Output" -Force | Out-Null }
+Copy-Item -Path $srcExe -Destination ".\Output\Supreme Tuner BPM V.2.2.exe" -Force
+Copy-Item -Path $srcFile -Destination ".\Output\Supreme Tuner BPM V.2.2.vst3" -Force
 Copy-Item -Path $srcExe -Destination ".\Output\Supreme Tuner BPM V.2.1.exe" -Force
 Copy-Item -Path $srcFile -Destination ".\Output\Supreme Tuner BPM V.2.1.vst3" -Force
 Copy-Item -Path $srcExe -Destination ".\Output\STB2.exe" -Force

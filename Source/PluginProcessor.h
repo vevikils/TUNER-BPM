@@ -131,6 +131,17 @@ public:
     float getDetectedAudioBpm() const { return detectedAudioBpm.load(); }
     bool isBpmLocked() const { return bpmIsLocked.load(); }
     void unlockBpm();
+    // Quick Tempo Multipliers (1/2x and 2x for Producers)
+    void halfBpm();
+    void doubleBpm();
+
+    // Error State Handling
+    bool hasFileAnalysisError() const { return hasFileError.load(); }
+    juce::String getFileErrorMessage() const
+    {
+        std::lock_guard<std::mutex> lock(fileMutex);
+        return fileErrorMessage;
+    }
     juce::String getBpmStatus() const;
 
     //==============================================================================
@@ -249,6 +260,8 @@ private:
     juce::AudioFormatManager formatManager;
     std::atomic<bool> fileAnalysisActive { false };
     std::atomic<bool> isAudioFileLoaded { false };
+    std::atomic<bool> hasFileError { false };
+    juce::String fileErrorMessage;
     std::atomic<uint32_t> currentJobId { 0 };
     std::atomic<bool> workerShouldExit { false };
     std::thread workerThread;

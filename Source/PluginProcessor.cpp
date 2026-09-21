@@ -88,7 +88,7 @@ TunerBPMPluginAudioProcessor::~TunerBPMPluginAudioProcessor()
 
 const juce::String TunerBPMPluginAudioProcessor::getName() const
 {
-    return "Supreme Tuner BPM V.2.1";
+    return "Supreme Tuner BPM V.2.2";
 }
 
 bool TunerBPMPluginAudioProcessor::acceptsMidi() const
@@ -211,7 +211,22 @@ void TunerBPMPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
     if (numSamples <= 0 || numChannels <= 0)
         return;
 
-    const float* inputData = buffer.getReadPointer(0);
+    // Safe Stereo Downmix & NaN/Inf Sanitization for 100% Stability
+    juce::HeapBlock<float> monoDownmix(numSamples);
+    const float* ch0 = buffer.getReadPointer(0);
+    const float* ch1 = (numChannels > 1) ? buffer.getReadPointer(1) : ch0;
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        float s0 = ch0[i];
+        float s1 = ch1[i];
+        if (!std::isfinite(s0)) s0 = 0.0f;
+        if (!std::isfinite(s1)) s1 = 0.0f;
+        float clean = (numChannels > 1) ? 0.5f * (s0 + s1) : s0;
+        monoDownmix[i] = juce::jlimit(-2.0f, 2.0f, clean);
+    }
+
+    const float* inputData = monoDownmix.get();
 
     // 1. Oscilloscope Ring Buffer Capture
     {
@@ -1044,6 +1059,34 @@ void TunerBPMPluginAudioProcessor::calculateTempoFromCombAndIntervals()
     }
 }
 
+void TunerBPMPluginAudioProcessor::halfBpm()
+{
+    float current = detectedAudioBpm.load();
+    if (current > 30.0f)
+    {
+        float newBpm = current * 0.5f;
+        detectedAudioBpm.store(newBpm);
+        bpmIsLocked.store(true);
+        std::lock_guard<std::mutex> lock(bpmMutex);
+        int displayBpm = juce::roundToInt(newBpm);
+        bpmStatusText = "TEMPO LOCKED: " + juce::String(displayBpm) + " BPM (1/2x)";
+    }
+}
+
+void TunerBPMPluginAudioProcessor::doubleBpm()
+{
+    float current = detectedAudioBpm.load();
+    if (current > 0.0f && current < 350.0f)
+    {
+        float newBpm = current * 2.0f;
+        detectedAudioBpm.store(newBpm);
+        bpmIsLocked.store(true);
+        std::lock_guard<std::mutex> lock(bpmMutex);
+        int displayBpm = juce::roundToInt(newBpm);
+        bpmStatusText = "TEMPO LOCKED: " + juce::String(displayBpm) + " BPM (2x)";
+    }
+}
+
 void TunerBPMPluginAudioProcessor::unlockBpm()
 {
     bpmIsLocked.store(false);
@@ -1079,6 +1122,11 @@ void TunerBPMPluginAudioProcessor::clearLoadedAudioFile()
     ++currentJobId;
     fileAnalysisActive.store(false);
     isAudioFileLoaded.store(false, std::memory_order_release);
+    hasFileError.store(false);
+    {
+        std::lock_guard<std::mutex> lock(fileMutex);
+        fileErrorMessage = "";
+    }
 
     {
         std::lock_guard<std::mutex> lock(workerMutex);
@@ -1102,11 +1150,12 @@ void TunerBPMPluginAudioProcessor::loadAndAnalyzeAudioFile(const juce::File& fil
 {
     uint32_t myJobId = ++currentJobId;
     fileAnalysisActive.store(true);
-    isAudioFileLoaded.store(true, std::memory_order_release);
+    hasFileError.store(false);
 
     {
         std::lock_guard<std::mutex> lock(fileMutex);
         loadedAudioFileName = file.getFileName();
+        fileErrorMessage = "";
     }
     {
         std::lock_guard<std::mutex> lock(bpmMutex);
@@ -1163,15 +1212,46 @@ void TunerBPMPluginAudioProcessor::analyzeFileInternal(const juce::File& file, u
         if (myJobId != currentJobId.load() || workerShouldExit.load())
             return;
 
-        std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
-        if (reader == nullptr)
+        if (!file.existsAsFile())
         {
             if (myJobId == currentJobId.load())
             {
+                hasFileError.store(true);
                 isAudioFileLoaded.store(false, std::memory_order_release);
                 fileAnalysisActive.store(false);
+                {
+                    std::lock_guard<std::mutex> lock(fileMutex);
+                    fileErrorMessage = "FILE NOT FOUND ON DISK";
+                }
                 std::lock_guard<std::mutex> lock(bpmMutex);
-                bpmStatusText = "ERROR READING FILE";
+                bpmStatusText = "ERROR: FILE NOT FOUND";
+            }
+            return;
+        }
+
+        std::unique_ptr<juce::AudioFormatReader> reader;
+        try
+        {
+            reader.reset(formatManager.createReaderFor(file));
+        }
+        catch (...)
+        {
+            reader.reset();
+        }
+
+        if (reader == nullptr || reader->numChannels <= 0 || reader->sampleRate <= 100.0)
+        {
+            if (myJobId == currentJobId.load())
+            {
+                hasFileError.store(true);
+                isAudioFileLoaded.store(false, std::memory_order_release);
+                fileAnalysisActive.store(false);
+                {
+                    std::lock_guard<std::mutex> lock(fileMutex);
+                    fileErrorMessage = "UNSUPPORTED AUDIO FORMAT OR CORRUPT METADATA";
+                }
+                std::lock_guard<std::mutex> lock(bpmMutex);
+                bpmStatusText = "ERROR: FORMAT NOT SUPPORTED";
             }
             return;
         }
@@ -1418,14 +1498,38 @@ void TunerBPMPluginAudioProcessor::analyzeFileInternal(const juce::File& file, u
         }
 
         if (myJobId == currentJobId.load())
+        {
+            hasFileError.store(false);
+            isAudioFileLoaded.store(true, std::memory_order_release);
             fileAnalysisActive.store(false);
+        }
+    }
+    catch (const std::exception& ex)
+    {
+        if (myJobId == currentJobId.load())
+        {
+            hasFileError.store(true);
+            isAudioFileLoaded.store(false, std::memory_order_release);
+            fileAnalysisActive.store(false);
+            {
+                std::lock_guard<std::mutex> lock(fileMutex);
+                fileErrorMessage = juce::String("EXCEPTION: ") + ex.what();
+            }
+            std::lock_guard<std::mutex> lock(bpmMutex);
+            bpmStatusText = "ERROR DURING ANALYSIS";
+        }
     }
     catch (...)
     {
         if (myJobId == currentJobId.load())
         {
+            hasFileError.store(true);
             isAudioFileLoaded.store(false, std::memory_order_release);
             fileAnalysisActive.store(false);
+            {
+                std::lock_guard<std::mutex> lock(fileMutex);
+                fileErrorMessage = "UNKNOWN DECODING EXCEPTION";
+            }
             std::lock_guard<std::mutex> lock(bpmMutex);
             bpmStatusText = "ERROR READING FILE";
         }
